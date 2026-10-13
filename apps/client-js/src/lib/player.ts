@@ -18,6 +18,7 @@ import { FilterType, FullTrackName, GroupOrder, Location, MoqtObject, Tuple } fr
 import { MOQtailClient } from 'moqtail/client';
 import { CMSFCatalog, RequestError } from 'moqtail/model';
 import { logger } from '@/lib/logger';
+import { resolveMediaSourceApi, type MediaSourceApi } from '@/lib/media-source';
 
 interface MOQStreamStruct {
   trackName: string;
@@ -58,6 +59,7 @@ export class Player {
 
   #element: HTMLVideoElement | null = null;
   #mse?: MediaSource;
+  #msApi?: MediaSourceApi;
   #streams: MOQStreamStruct[] = [];
   #options: Required<PlayerOptions>;
 
@@ -114,7 +116,9 @@ export class Player {
 
   async attachMedia(element: HTMLVideoElement) {
     // Create a MediaSource and set it as the video element's source
-    const mediaSource = new MediaSource();
+    this.#msApi = resolveMediaSourceApi();
+    if (this.#msApi.managed) element.disableRemotePlayback = true;
+    const mediaSource = new this.#msApi.ctor();
     element.src = URL.createObjectURL(mediaSource);
     this.#element = element;
     this.#mse = mediaSource;
@@ -410,9 +414,9 @@ export class Player {
     const mimeType = `${role}/mp4; codecs="${codecString}"`;
     logger.info(
       'player',
-      `#newSourceBufferMSE: mimeType="${mimeType}" supported=${MediaSource.isTypeSupported(mimeType)}`,
+      `#newSourceBufferMSE: mimeType="${mimeType}" supported=${this.#msApi!.ctor.isTypeSupported(mimeType)}`,
     );
-    if (!MediaSource.isTypeSupported(mimeType)) {
+    if (!this.#msApi!.ctor.isTypeSupported(mimeType)) {
       await this.unsubscribe(struct.requestId);
       throw new Error(`MIME type not supported: ${mimeType}`);
     }
