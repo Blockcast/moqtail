@@ -109,4 +109,22 @@ if (import.meta.vitest) {
       expect(() => TerminationCode.tryFrom(0x1c)).toThrow(InvalidTypeError)
     })
   })
+
+  // Asserted against dev/conformance/draft22/, which is shared with moqtail-rs. Unlike
+  // this package's other enums, TerminationCode spells its members exactly as the draft
+  // does, so the fixture name is used verbatim rather than PascalCased.
+  describe('draft-22 conformance', () => {
+    const fixture = async () => await import('../../../test/conformance')
+
+    test('TerminationCode matches termination_codes.json', async () => {
+      const { terminationCodes, assertRegistry, specIdent } = await fixture()
+      assertRegistry(terminationCodes(), specIdent, (codepoint) => {
+        try {
+          return TerminationCode[TerminationCode.tryFrom(Number(codepoint))]
+        } catch {
+          return undefined
+        }
+      })
+    })
+  })
 }

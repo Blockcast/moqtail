@@ -424,3 +424,79 @@ export namespace RequestErrorCode {
     }
   }
 }
+
+if (import.meta.vitest) {
+  const { describe, expect, test } = import.meta.vitest
+
+  // Asserted against dev/conformance/draft22/, which is shared with moqtail-rs. No
+  // codepoint is repeated here: each test asks the enum what it parses a fixture value
+  // as. The loader is imported dynamically so it stays out of the published bundle.
+  describe('draft-22 conformance', () => {
+    const fixture = async () => await import('../../../test/conformance')
+
+    test('ControlMessageType matches message_types.json', async () => {
+      const { messageTypes, assertRegistry, pascalIdent } = await fixture()
+      assertRegistry(messageTypes(), pascalIdent({ GOAWAY: 'GoAway' }), (codepoint) => {
+        try {
+          return ControlMessageType[Number(ControlMessageType.tryFrom(codepoint))]
+        } catch {
+          return undefined
+        }
+      })
+    })
+
+    test('RequestErrorCode matches request_error_codes.json', async () => {
+      const { requestErrorCodes, assertRegistry, pascalIdent } = await fixture()
+      assertRegistry(requestErrorCodes(), pascalIdent(), (codepoint) => {
+        try {
+          return RequestErrorCode[Number(RequestErrorCode.tryFrom(codepoint))]
+        } catch {
+          return undefined
+        }
+      })
+    })
+
+    test('PublishDoneStatusCode matches publish_done_codes.json', async () => {
+      const { publishDoneCodes, assertRegistry, pascalIdent } = await fixture()
+      assertRegistry(publishDoneCodes(), pascalIdent(), (codepoint) => {
+        try {
+          return PublishDoneStatusCode[Number(PublishDoneStatusCode.tryFrom(codepoint))]
+        } catch {
+          return undefined
+        }
+      })
+    })
+
+    // Unknown and greased codes are reported as InternalError, never thrown.
+    test('fromWire maps unknown and grease codes to InternalError', () => {
+      expect(RequestErrorCode.fromWire(0x1n)).toBe(RequestErrorCode.Unauthorized)
+      expect(PublishDoneStatusCode.fromWire(0x2n)).toBe(PublishDoneStatusCode.TrackEnded)
+      for (const raw of [0x7en, greaseValue(0)!, greaseValue(5)!]) {
+        expect(RequestErrorCode.fromWire(raw)).toBe(RequestErrorCode.InternalError)
+        expect(PublishDoneStatusCode.fromWire(raw)).toBe(PublishDoneStatusCode.InternalError)
+      }
+    })
+
+    test('the reset and request-error registries stay separate', () => {
+      expect(StreamResetCode.GoingAway).toBe(0x4)
+      expect(RequestErrorCode.GoingAway).toBe(0x6)
+      expect(StreamResetCode.ExpiredAuthToken).toBe(0x7)
+      expect(RequestErrorCode.ExpiredAuthToken).toBe(0x5)
+    })
+
+    test('isFirst matches the Stream column of message_types.json', async () => {
+      const { messageTypes, parseHex, pendingIssue } = await fixture()
+      const graded = messageTypes()
+        // A pending entry is one this stack does not parse yet, so asking tryFrom
+        // about it would throw rather than disagree. assertRegistry exempts the same set.
+        .entries.filter((entry) => !entry.reserved && pendingIssue(entry) === undefined)
+        .map((entry) => ({
+          name: entry.name,
+          expected: (entry.stream ?? '').includes('First'),
+          actual: ControlMessageType.isFirst(ControlMessageType.tryFrom(parseHex(entry.value))),
+        }))
+      expect(graded.filter((e) => e.expected).map((e) => e.name).length).toBe(7)
+      expect(graded.filter((e) => e.actual !== e.expected)).toEqual([])
+    })
+  })
+}
