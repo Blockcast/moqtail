@@ -97,8 +97,8 @@ export function getHandlerForRequestStreamMessage(msg: ControlMessage): RequestS
   // Responses, correlated by the stream they arrive on.
   if (msg instanceof SubscribeOk) return handlerSubscribeOk
   if (msg instanceof FetchOk) return handlerFetchOk
-  // RequestOk also answers PUBLISH: PUBLISH_OK (0x1E) is an alias of REQUEST_OK, so
-  // both codepoints arrive here as a RequestOk.
+  // RequestOk also answers PUBLISH. 0x1E, PUBLISH_OK in <= 17, is reserved and never
+  // parses (§9.3).
   if (msg instanceof RequestOk) return handlerRequestOk
   if (msg instanceof RequestError) return handlerRequestError
   // Follow-ups on an open request stream.

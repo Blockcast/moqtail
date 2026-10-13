@@ -31,6 +31,7 @@ export enum ControlMessageType {
   ReservedServerSetupV10 = 0x41, // RESERVED; rejected by tryFrom
   ReservedClientSetupV16 = 0x20, // RESERVED; rejected by tryFrom
   ReservedServerSetupV16 = 0x21, // RESERVED; rejected by tryFrom
+  ReservedPublishOkV17 = 0x1e, // RESERVED; rejected by tryFrom. PUBLISH is answered by REQUEST_OK
   Setup = 0x2f00, // Control
   GoAway = 0x10, // Control, Request
   Subscribe = 0x03, // Request, First
@@ -48,7 +49,6 @@ export enum ControlMessageType {
   SubscribeNamespace = 0x50, // Request, First
   SubscribeTracks = 0x51, // Request, First
   Publish = 0x1d, // Request, First
-  PublishOk = 0x1e, // Request; an alias of RequestOk (§10.5), not its own body
   PublishSkipped = 0x0f, // Request
 }
 
@@ -136,8 +136,6 @@ export namespace ControlMessageType {
         return ControlMessageType.SubscribeTracks
       case 0x1dn:
         return ControlMessageType.Publish
-      case 0x1en:
-        return ControlMessageType.PublishOk
       case 0x0fn:
         return ControlMessageType.PublishSkipped
       default:

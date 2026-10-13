@@ -97,11 +97,6 @@ impl ControlMessage {
       ControlMessageType::Publish => {
         Publish::parse_payload(&mut payload).map(ControlMessage::Publish)
       }
-      // PUBLISH_OK (0x1E) is a REQUEST_OK alias with no body of its own: PUBLISH is
-      // answered by REQUEST_OK. Parse its body as REQUEST_OK.
-      ControlMessageType::PublishOk => {
-        RequestOk::parse_payload(&mut payload).map(ControlMessage::RequestOk)
-      }
       ControlMessageType::PublishDone => {
         PublishDone::parse_payload(&mut payload).map(ControlMessage::PublishDone)
       }

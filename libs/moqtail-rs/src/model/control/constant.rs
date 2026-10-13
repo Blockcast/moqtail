@@ -19,6 +19,11 @@ use crate::model::error::ParseError;
 pub const SUPPORTED_VERSIONS: &str = "moqt-22";
 
 /// Control message types.
+///
+/// Reserved codepoints are absent from this enum so `TryFrom` rejects them; an endpoint
+/// receiving an unknown message type MUST close the session. That includes `0x1E`,
+/// PUBLISH_OK in version <= 17: draft-22 Table 5 reserves it, and PUBLISH is answered by
+/// REQUEST_OK (§9.3), so accepting it would let a draft-17 PUBLISH_OK pass for a REQUEST_OK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u64)]
 pub enum ControlMessageType {
@@ -39,7 +44,6 @@ pub enum ControlMessageType {
   SubscribeTracks = 0x51,    // Request, First
   Publish = 0x1D,            // Request, First
   PublishDone = 0x0B,        // Request
-  PublishOk = 0x1E,          // Request; an alias of RequestOk, not its own body
   PublishSkipped = 0x0F,     // Request
 }
 
@@ -65,7 +69,6 @@ impl TryFrom<u64> for ControlMessageType {
       0x50 => Ok(ControlMessageType::SubscribeNamespace),
       0x51 => Ok(ControlMessageType::SubscribeTracks),
       0x1D => Ok(ControlMessageType::Publish),
-      0x1E => Ok(ControlMessageType::PublishOk),
       0x0F => Ok(ControlMessageType::PublishSkipped),
       _ => Err(ParseError::InvalidType {
         context: " ControlMessageType::try_from(u64)",
@@ -366,5 +369,15 @@ mod tests {
         PublishDoneStatusCode::InternalError
       );
     }
+  }
+
+  #[test]
+  fn reserved_publish_ok_v17_is_rejected() {
+    assert!(ControlMessageType::try_from(0x1Eu64).is_err());
+    // PUBLISH is answered by REQUEST_OK, which still parses.
+    assert_eq!(
+      ControlMessageType::try_from(0x07u64).unwrap(),
+      ControlMessageType::RequestOk
+    );
   }
 }

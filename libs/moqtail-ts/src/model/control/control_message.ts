@@ -32,7 +32,7 @@ import { RequestUpdate } from './request_update'
 import { TrackStatus } from './track_status'
 import { SubscribeNamespace } from './subscribe_namespace'
 import { SubscribeTracks } from './subscribe_tracks'
-import { NotEnoughBytesError } from '../error/error'
+import { NotEnoughBytesError, InvalidEnumValue } from '../error/error'
 import { Tuple } from '../common'
 import { AuthorizationToken } from '../parameter/common/authorization_token'
 import { RequestOk } from './request_ok'
@@ -70,10 +70,6 @@ export namespace ControlMessage {
     switch (messageType) {
       case ControlMessageType.Publish:
         return Publish.parsePayload(payload)
-      // PUBLISH_OK (0x1E) is a REQUEST_OK alias with no body of its own: PUBLISH is
-      // answered by REQUEST_OK. Parse its body as REQUEST_OK.
-      case ControlMessageType.PublishOk:
-        return RequestOk.parsePayload(payload)
       case ControlMessageType.PublishDone:
         return PublishDone.parsePayload(payload)
       case ControlMessageType.PublishNamespace:
@@ -162,15 +158,15 @@ if (import.meta.vitest) {
     })
 
     describe('RequestOk', () => {
-      test('PUBLISH_OK (0x1E) parses as RequestOk', () => {
+      test('0x1E is reserved and no longer parses as RequestOk', () => {
         const requestOk = new RequestOk()
         const bytes = ControlMessage.serialize(requestOk).toUint8Array()
-        // Table 5 keeps 0x1E but points it at §10.5, REQUEST_OK. Both codepoints are
+        // Draft-22 Table 5 reserves 0x1E (PUBLISH_OK in <= 17). Both codepoints are
         // one-byte varints, so retyping the message is a single-byte edit.
-        bytes[0] = ControlMessageType.PublishOk
-        const deserialized = ControlMessage.deserialize(new FrozenByteBuffer(bytes))
-        expect(deserialized).toBeInstanceOf(RequestOk)
-        expect(deserialized).toEqual(requestOk)
+        bytes[0] = ControlMessageType.ReservedPublishOkV17
+        expect(() => ControlMessage.deserialize(new FrozenByteBuffer(bytes))).toThrow(InvalidEnumValue)
+        bytes[0] = ControlMessageType.RequestOk
+        expect(ControlMessage.deserialize(new FrozenByteBuffer(bytes))).toEqual(requestOk)
       })
     })
 

@@ -288,7 +288,6 @@ impl MessageParameter {
         msg_type,
         ControlMessageType::SubscribeOk
           | ControlMessageType::Publish
-          | ControlMessageType::PublishOk
           | ControlMessageType::RequestOk
       ),
       Self::LargestObject { .. } => matches!(
@@ -340,8 +339,7 @@ impl MessageParameter {
       // REQUEST_OK.
       Self::SwitchingSetAssignment { .. } => matches!(
         msg_type,
-        ControlMessageType::PublishOk
-          | ControlMessageType::RequestOk
+        ControlMessageType::RequestOk
           | ControlMessageType::Subscribe
           | ControlMessageType::RequestUpdate
       ),
@@ -1110,7 +1108,6 @@ mod tests {
     for msg_type in [
       ControlMessageType::Subscribe,
       ControlMessageType::RequestUpdate,
-      ControlMessageType::PublishOk,
       ControlMessageType::RequestOk,
     ] {
       assert!(param.is_valid_for(msg_type), "{msg_type:?} allows it");
@@ -1620,9 +1617,10 @@ mod tests {
         param.is_valid_for(ControlMessageType::RequestUpdate),
         "{param:?}"
       );
-      for msg_type in [ControlMessageType::PublishOk, ControlMessageType::RequestOk] {
-        assert!(!param.is_valid_for(msg_type), "{param:?} in {msg_type:?}");
-      }
+      assert!(
+        !param.is_valid_for(ControlMessageType::RequestOk),
+        "{param:?} in RequestOk"
+      );
     }
     // What a PUBLISH_OK or REQUEST_UPDATE_OK may still carry.
     assert!(MessageParameter::new_expires(10).is_valid_for(ControlMessageType::RequestOk));
@@ -1712,7 +1710,6 @@ mod tests {
       assert!(order.is_valid_for(msg_type), "{msg_type:?} allows it");
     }
     for msg_type in [
-      ControlMessageType::PublishOk,
       ControlMessageType::RequestOk,
       ControlMessageType::SubscribeOk,
       ControlMessageType::FetchOk,

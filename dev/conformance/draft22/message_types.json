@@ -80,8 +80,7 @@
       "value": "0x1E",
       "reserved": true,
       "spec": "Table 5",
-      "notes": "PUBLISH_OK in version <= 17. Table 5 lists it as RESERVED; the acceptance is REQUEST_OK (Section 9.3).",
-      "pending": { "rs": 417, "ts": 417 }
+      "notes": "PUBLISH_OK in version <= 17. Table 5 lists it as RESERVED; the acceptance is REQUEST_OK (Section 9.3)."
     },
     {
       "name": "PUBLISH_DONE",
