@@ -32,6 +32,7 @@ import { SubscribeNamespaceRequest } from './request/subscribe_namespace'
 import { MOQtailClient } from './client'
 import { PublishRequest } from './request/publish'
 import { TrackStatusRequest } from './request/track_status'
+import type { OrderedSubgroupLimits } from './request/ordered_subgroups'
 /**
  * Discriminated union of every in‑flight MOQ‑tail control request tracked by the {@link MOQtailClient}.
  *
@@ -161,6 +162,8 @@ export type MOQtailClientOptions = {
     onDatagramReceived?: (data: Datagram) => void
     /** Invoked after enqueuing each outbound datagram object/status. */
     onDatagramSent?: (data: Datagram) => void
+    /** Fired after a subgroup stream ends with a FIN and all of its objects have been delivered. */
+    onSubgroupClosed?: (event: SubgroupClosedEvent) => void
   }
 }
 
@@ -211,6 +214,24 @@ export type SubscribeOptions = {
   relativePrevious?: bigint | number
   /** Per-subscription early discard policy. Overrides the client-level default set via {@link MOQtailClient.setEarlyDiscardPolicy}. */
   earlyDiscardPolicy?: EarlyDiscardPolicyConfig
+  /**
+   * Opt in to ordered subgroup delivery: objects reach the stream in `(group, subgroup)`
+   * order, each subgroup only after the one before it ended with a FIN, instead of in the
+   * order they arrived across concurrent streams. The limits bound the memory held while
+   * waiting; when they are exceeded the oldest waiting subgroup is dropped. Omitted, objects
+   * are delivered as they arrive.
+   */
+  orderedSubgroups?: { limits?: OrderedSubgroupLimits }
+}
+
+/** A subgroup stream that ended with a FIN after all of its objects were delivered. */
+export type SubgroupClosedEvent = {
+  trackAlias: bigint
+  fullTrackName: FullTrackName
+  groupId: bigint
+  subgroupId: bigint | null
+  lastObjectId: bigint | null
+  containsEndOfGroup: boolean
 }
 
 /**

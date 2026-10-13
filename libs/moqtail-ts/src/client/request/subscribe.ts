@@ -27,6 +27,7 @@ import {
 } from '@/model'
 import { DEFAULT_SWITCH_DRAIN_TIMEOUT_MS, type EarlyDiscardPolicyConfig } from '../types'
 import { logger } from '../../util/logger'
+import { OrderedSubgroupDelivery, type OrderedSubgroupLimits } from './ordered_subgroups'
 
 // TODO: Add timeout mechanism for unsubscribing
 
@@ -45,6 +46,13 @@ export class SubscribeRequest implements PromiseLike<SubscribeOk | RequestError>
   public forward: boolean
   public subscribeParameters: MessageParameter[]
   public earlyDiscardPolicy: EarlyDiscardPolicyConfig | undefined
+  /** Set by {@link SubscribeOptions.orderedSubgroups}; ordering starts at SUBSCRIBE_OK. */
+  public orderedSubgroupLimits: OrderedSubgroupLimits | undefined
+  /**
+   * Releases reliable subgroups in `(group, subgroup)` order when the subscriber
+   * opted in. Undefined in the default arrival-order mode.
+   */
+  public orderedSubgroups: OrderedSubgroupDelivery | undefined
 
   // Track Data State
   public largestLocation: Location | undefined // Updated on each received object
@@ -144,6 +152,22 @@ export class SubscribeRequest implements PromiseLike<SubscribeOk | RequestError>
       )
     } else if (value instanceof SubscribeOk) {
       logger.debug('request/subscribe', `resolved with OK requestId=${this.requestId} trackAlias=${value.trackAlias}`)
+      if (this.orderedSubgroupLimits && !this.orderedSubgroups) {
+        // An absolute start fixes the window, so streams racing in for earlier groups
+        // are dropped. Any other filter starts wherever the publisher's first stream
+        // lands, and the window anchors on that.
+        const ordered: OrderedSubgroupDelivery = new OrderedSubgroupDelivery(
+          this.startLocation?.group,
+          (object) => {
+            const delivered = this.manager
+              ? this.manager.deliver(this, object)
+              : (this.controller.enqueue(object), true)
+            if (!delivered) ordered.retire()
+          },
+          this.orderedSubgroupLimits,
+        )
+        this.orderedSubgroups = ordered
+      }
     }
     this.#resolve(value)
   }

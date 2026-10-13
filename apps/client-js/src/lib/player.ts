@@ -524,6 +524,9 @@ export class Player {
       filterType: FilterType.NextGroupStart,
       forward: true,
       priority: params.priority ?? 0,
+      // MSE needs each group's fragments in order, so release subgroups in
+      // (group, subgroup) order rather than in arrival order.
+      orderedSubgroups: {},
     });
     if (result instanceof RequestError) {
       logger.error(
