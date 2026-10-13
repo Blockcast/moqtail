@@ -2230,8 +2230,14 @@ export class MOQtailClient {
         await handler(this, msg)
       }
     } catch (error) {
-      this.disconnect()
-      throw error
+      // MOQtailClient.new() starts this loop without awaiting it, so a rethrow here
+      // becomes an unhandled rejection on every session end, including the ordinary
+      // case of the peer closing its control stream. Log and disconnect instead, as
+      // #acceptIncomingUniStreams does when its reader ends.
+      logger.error('MOQtailClient', 'handleIncomingControlMessages error', error)
+      this.disconnect(error).catch((disconnectError) => {
+        logger.error('MOQtailClient', 'disconnect after control stream error failed', disconnectError)
+      })
     }
   }
 
@@ -2693,6 +2699,32 @@ if (import.meta.vitest) {
 
       transport.openIncomingUniStream(new GoAway('https://elsewhere.example').serialize().toUint8Array())
       await expect(connecting).rejects.toThrow('Expected setup as the first control message')
+    })
+
+    it('ends the session without an unhandled rejection when the peer closes the control stream', async () => {
+      const unhandled: unknown[] = []
+      const onUnhandled = (reason: unknown) => unhandled.push(reason)
+      process.on('unhandledRejection', onUnhandled)
+      try {
+        const connecting = connect()
+        const transport = MockWebTransport.last
+        await vi.waitFor(() => expect(transport.sentChunks).toHaveLength(1))
+        const control = transport.openIncomingUniStream(
+          new Setup(new SetupOptions().build()).serialize().toUint8Array(),
+        )
+        const client = await connecting
+        const terminated = vi.fn()
+        client.onSessionTerminated = terminated
+
+        control.close()
+
+        await vi.waitFor(() => expect(transport.closeCount).toBe(1))
+        expect(terminated).toHaveBeenCalledTimes(1)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(unhandled).toEqual([])
+      } finally {
+        process.off('unhandledRejection', onUnhandled)
+      }
     })
   })
 
