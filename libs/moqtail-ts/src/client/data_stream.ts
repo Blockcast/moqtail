@@ -166,16 +166,11 @@ export class RecvStream {
         }
 
         const { done, value } = readResult
-        if (done) {
-          throw new ProtocolViolationError(
-            'RecvStream.new',
-            internalBuffer.length > 0
-              ? 'Stream closed with incomplete header data.'
-              : 'Stream closed before any header data received.',
-          )
-        }
         if (value) {
           internalBuffer.putBytes(value)
+        }
+        if (done && internalBuffer.length === 0) {
+          throw new ProtocolViolationError('RecvStream.new', 'Stream closed before any header data received.')
         }
         try {
           internalBuffer.checkpoint()
@@ -186,6 +181,9 @@ export class RecvStream {
         } catch (e) {
           if (e instanceof NotEnoughBytesError) {
             internalBuffer.restore()
+            if (done) {
+              throw new ProtocolViolationError('RecvStream.new', 'Stream closed with incomplete header data.')
+            }
             continue
           } else {
             throw e
@@ -258,7 +256,14 @@ export class RecvStream {
         }
 
         const { done, value } = readResult
+        if (value) {
+          this.#internalBuffer.putBytes(value)
+        }
         if (done) {
+          // A reader may hand back its final non-empty chunk together with
+          // `done`. Parse that chunk before deciding whether FIN left a partial
+          // object behind.
+          if (value && value.byteLength > 0) continue
           if (this.#internalBuffer.remaining > 0) {
             logger.error(
               'data_stream',
@@ -275,9 +280,6 @@ export class RecvStream {
             controller.close()
           }
           break
-        }
-        if (value) {
-          this.#internalBuffer.putBytes(value)
         }
       }
     } catch (error) {
@@ -383,6 +385,55 @@ if (import.meta.vitest) {
         const { value: receivedObject } = await receivePromise
         expect(receivedObject).toEqual(fetchObject)
         reader.releaseLock()
+      })
+    })
+
+    describe('final chunk delivered with done', () => {
+      // A reader that returns its last bytes in the same result as `done`.
+      const finalChunkStream = (...chunks: Uint8Array[]) => {
+        const results = chunks.map((value, i) => ({ done: i === chunks.length - 1, value }))
+        const reader = {
+          read: async () => results.shift() ?? { done: true, value: undefined },
+          cancel: async () => {},
+          releaseLock: () => {},
+        }
+        return { getReader: () => reader } as unknown as ReadableStream<Uint8Array>
+      }
+      const header = Header.newSubgroup(SubgroupHeaderType.fromProperties(false, 0, false), 0n, 0n, 0, 0)
+      const object = SubgroupObject.newWithPayload(1, null, new Uint8Array([1, 2, 3]))
+
+      test('parses an object whose last bytes arrive with done', async () => {
+        const bytes = object.serialize(undefined).toUint8Array()
+        const recv = await RecvStream.new(
+          finalChunkStream(header.serialize().toUint8Array(), bytes.slice(0, -1), bytes.slice(-1)),
+        )
+        const reader = recv.stream.getReader()
+        expect(await reader.read()).toEqual({ done: false, value: object })
+        expect(await reader.read()).toEqual({ done: true, value: undefined })
+      })
+
+      test('parses a header and object delivered in one chunk with done', async () => {
+        const recv = await RecvStream.new(
+          finalChunkStream(
+            new Uint8Array([...header.serialize().toUint8Array(), ...object.serialize(undefined).toUint8Array()]),
+          ),
+        )
+        expect(recv.header).toEqual(header)
+        const reader = recv.stream.getReader()
+        expect(await reader.read()).toEqual({ done: false, value: object })
+        expect(await reader.read()).toEqual({ done: true, value: undefined })
+      })
+
+      test('still rejects an incomplete object left at done', async () => {
+        const bytes = object.serialize(undefined).toUint8Array()
+        const recv = await RecvStream.new(finalChunkStream(header.serialize().toUint8Array(), bytes.slice(0, -1)))
+        await expect(recv.stream.getReader().read()).rejects.toThrow(/incomplete object data/i)
+      })
+
+      test('still rejects an incomplete header left at done', async () => {
+        await expect(RecvStream.new(finalChunkStream(header.serialize().toUint8Array().slice(0, -1)))).rejects.toThrow(
+          /incomplete header data/i,
+        )
       })
     })
   })
