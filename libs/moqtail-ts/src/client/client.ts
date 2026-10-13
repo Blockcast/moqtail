@@ -82,6 +82,11 @@ import { LiveTrackSource } from './track/content_source'
 import { PublishNamespaceRequest } from './request/publish_namespace'
 import { FetchRequest } from './request/fetch'
 import { SubscribeRequest, Subscription } from './request/subscribe'
+import {
+  DEFAULT_ORDERED_SUBGROUP_LIMITS,
+  OrderedSubgroupStream,
+  type OrderedSubgroupAbandonReason,
+} from './request/ordered_subgroups'
 import { PublishRequest } from './request/publish'
 import { TrackStatusRequest } from './request/track_status'
 import { getHandlerForControlMessage, getHandlerForRequestStreamMessage } from './handler/handler'
@@ -96,6 +101,7 @@ import { PeerStreamResetError, streamResetCodeOf, streamResetReason } from './ut
 import {
   MOQtailRequest,
   SubscribeOptions,
+  SubgroupClosedEvent,
   SubscribeUpdateOptions,
   FetchOptions,
   MOQtailClientOptions,
@@ -340,6 +346,13 @@ export class MOQtailClient {
   /** Invoked after enqueuing each outbound datagram object/status. */
   onDatagramSent?: (data: Datagram) => void
 
+  /**
+   * Invoked once a subgroup stream has ended with a FIN and every object it carried has
+   * been delivered: for an ordered subscription, after its objects were released in order.
+   * Not invoked for a stream that was reset, cancelled, or dropped by ordered delivery.
+   */
+  onSubgroupClosed?: (event: SubgroupClosedEvent) => void
+
   /** Fired when an inbound PUBLISH control message is received. */
   onPeerPublish?: (msg: Publish, stream: ReadableStream<MoqtObject>) => void
 
@@ -581,6 +594,7 @@ export class MOQtailClient {
       if (callbacks?.onSessionTerminated) client.onSessionTerminated = callbacks.onSessionTerminated
       if (callbacks?.onDatagramReceived) client.onDatagramReceived = callbacks.onDatagramReceived
       if (callbacks?.onDatagramSent) client.onDatagramSent = callbacks.onDatagramSent
+      if (callbacks?.onSubgroupClosed) client.onSubgroupClosed = callbacks.onSubgroupClosed
 
       if (dataStreamTimeoutMs) client.dataStreamTimeoutMs = dataStreamTimeoutMs
       if (controlStreamTimeoutMs) client.controlStreamTimeoutMs = controlStreamTimeoutMs
@@ -1098,6 +1112,8 @@ export class MOQtailClient {
       const request = new SubscribeRequest(msg)
       request.manager = new Subscription(request)
       request.earlyDiscardPolicy = args.earlyDiscardPolicy
+      if (args.orderedSubgroups)
+        request.orderedSubgroupLimits = args.orderedSubgroups.limits ?? DEFAULT_ORDERED_SUBGROUP_LIMITS
       this.requests.set(request.requestId, request)
       this.requestIdMap.addMapping(request.requestId, request.fullTrackName)
 
@@ -1382,6 +1398,9 @@ export class MOQtailClient {
       return false
     }
 
+    // ponytail: pending subgroups are dropped silently here; completion counts streams
+    // accepted, not drained, so failing the stream on them would punish that race too.
+    request.orderedSubgroups?.retire()
     const owner = request.manager
     if (owner) {
       owner.drop(request)
@@ -2438,6 +2457,66 @@ export class MOQtailClient {
           // for seconds.
           const fullTrackName: FullTrackName = subscription.fullTrackName
           let firstObjectId: bigint | null = null
+          let lastObjectId: bigint | null = null
+          const containsEndOfGroup = SubgroupHeaderType.containsEndOfGroup(header.type)
+          const subgroupIdOf = (objectId: bigint | null): bigint | null => {
+            if (SubgroupHeaderType.isSubgroupIdZero(header.type)) return 0n
+            if (SubgroupHeaderType.isSubgroupIdFirstObjectId(header.type)) return objectId
+            if (SubgroupHeaderType.hasExplicitSubgroupId(header.type)) return header.subgroupId ?? null
+            return null
+          }
+          const emitSubgroupClosed = () => {
+            try {
+              this.onSubgroupClosed?.({
+                trackAlias: header.trackAlias,
+                fullTrackName,
+                groupId: header.groupId,
+                subgroupId: subgroupIdOf(firstObjectId),
+                lastObjectId,
+                containsEndOfGroup,
+              })
+            } catch (error) {
+              logger.error('MOQtailClient', 'onSubgroupClosed callback failed', error)
+            }
+          }
+
+          // Ordered delivery holds this stream's objects until every earlier subgroup has
+          // been released, and may drop it: before the window, or to free room.
+          const ordered = subscription.orderedSubgroups
+          let abandoned = false
+          const abandon = (reason: OrderedSubgroupAbandonReason) => {
+            if (abandoned) return
+            abandoned = true
+            logger.warn(
+              'MOQtailClient',
+              `dropping ordered subgroup trackAlias=${header.trackAlias} group=${header.groupId} reason=${reason}`,
+            )
+            void recvStream.stopSending(StreamResetCode.Cancelled)
+          }
+          // A subgroup named by its first object has no identity until that object is
+          // read, so its place in the order is held from the header on.
+          const derivesSubgroupId = SubgroupHeaderType.isSubgroupIdFirstObjectId(header.type)
+          const reservation =
+            ordered && derivesSubgroupId ? ordered.reserve(header.groupId, containsEndOfGroup, abandon) : undefined
+          const orderedStream = ordered
+            ? new OrderedSubgroupStream(
+                header.groupId,
+                derivesSubgroupId ? null : subgroupIdOf(null),
+                containsEndOfGroup,
+                derivesSubgroupId,
+                (groupId, subgroupId, endOfGroup, onReleased, onAbandoned) => {
+                  const registration = reservation
+                    ? ordered.registerReserved(reservation, groupId, subgroupId, endOfGroup, onReleased, onAbandoned)
+                    : ordered.register(groupId, subgroupId, endOfGroup, onReleased, onAbandoned)
+                  return {
+                    append: (object) => ordered.append(registration, object),
+                    complete: () => ordered.complete(registration),
+                  }
+                },
+                emitSubgroupClosed,
+                abandon,
+              )
+            : undefined
 
           let subgroupTimeoutId: ReturnType<typeof setTimeout> | undefined
           const effectiveDiscardPolicy = subscription.earlyDiscardPolicy ?? this.#earlyDiscardPolicy
@@ -2450,23 +2529,17 @@ export class MOQtailClient {
           try {
             while (true) {
               const { done, value: nextObject } = await reader.read()
-              if (done) {
+              if (done || abandoned) {
                 break
               }
               if (nextObject) {
                 if (nextObject instanceof SubgroupObject) {
                   // TODO: validate if it's a valid subgroup object
-                  if (!firstObjectId) {
+                  if (firstObjectId === null) {
                     firstObjectId = nextObject.objectId
                   }
-                  let subgroupId: bigint | null = null
-                  if (SubgroupHeaderType.isSubgroupIdZero(header.type)) {
-                    subgroupId = 0n
-                  } else if (SubgroupHeaderType.isSubgroupIdFirstObjectId(header.type)) {
-                    subgroupId = firstObjectId ?? null
-                  } else if (SubgroupHeaderType.hasExplicitSubgroupId(header.type)) {
-                    subgroupId = header.subgroupId ?? null
-                  }
+                  lastObjectId = nextObject.objectId
+                  const subgroupId = subgroupIdOf(firstObjectId)
 
                   const moqtObject = MoqtObject.fromSubgroupObject(
                     nextObject,
@@ -2479,7 +2552,17 @@ export class MOQtailClient {
                   if (subscription.largestLocation.compare(moqtObject.location) == -1)
                     subscription.largestLocation = moqtObject.location
 
-                  if (subscription.manager) {
+                  if (orderedStream) {
+                    // False once the subgroup was dropped, or delivery stopped because a
+                    // switch superseded this request.
+                    if (!orderedStream.append(moqtObject)) {
+                      if (!abandoned) {
+                        abandoned = true
+                        await recvStream.stopSending(StreamResetCode.Cancelled)
+                      }
+                      break
+                    }
+                  } else if (subscription.manager) {
                     const shouldContinue = subscription.manager.deliver(subscription, moqtObject)
                     if (!shouldContinue) {
                       forceComplete = true
@@ -2495,6 +2578,11 @@ export class MOQtailClient {
           } finally {
             if (subgroupTimeoutId !== undefined) clearTimeout(subgroupTimeoutId)
           }
+
+          // Released in order only once the FIN is in: emitSubgroupClosed runs from there.
+          if (orderedStream) {
+            if (!abandoned) orderedStream.complete()
+          } else if (!forceComplete) emitSubgroupClosed()
 
           this.completeSubscription(subscription, forceComplete)
           return
@@ -3779,6 +3867,84 @@ if (import.meta.vitest) {
       expect(firstStream.abortReason).toBeUndefined()
 
       await client.disconnect()
+    })
+
+    describe('ordered subgroup delivery', () => {
+      const subgroup = (group: bigint, sub: bigint, text: string) => {
+        const bytes = new ByteBuffer()
+        bytes.putBytes(Header.newSubgroup(SubgroupHeaderType.Type0x14, 7n, group, sub, 0).serialize().toUint8Array())
+        bytes.putBytes(
+          SubgroupObject.newWithPayload(0, null, new TextEncoder().encode(text)).serialize(undefined).toUint8Array(),
+        )
+        return bytes.toUint8Array()
+      }
+      const subscribed = async (
+        ordered: boolean,
+        locationFilter = new LocationFilter(LocationFilterType.NextObject),
+      ) => {
+        const { client, transport } = await connected()
+        const closed: string[] = []
+        client.onSubgroupClosed = (event) => closed.push(`${event.groupId}:${event.subgroupId}`)
+        const subscribing = client.subscribe({
+          fullTrackName: ftn,
+          locationFilter,
+          forward: true,
+          groupOrder: GroupOrder.Original,
+          priority: 0,
+          ...(ordered ? { orderedSubgroups: {} } : {}),
+        })
+        ;(await openedStream(transport, 0)).respond(SubscribeOk.create(7n, [], []))
+        const { stream } = (await subscribing) as { stream: ReadableStream<MoqtObject> }
+        const reader = stream.getReader()
+        const next = async () => new TextDecoder().decode((await reader.read()).value!.payload!)
+        return { client, transport, closed, next }
+      }
+
+      it('holds a later subgroup until the earlier one ends, and reports each FIN after its objects', async () => {
+        const { client, transport, closed, next } = await subscribed(true)
+
+        // Subgroup 0 is open and has sent one object; subgroup 1 arrives whole.
+        const first = transport.openIncomingUniStream(subgroup(4n, 0n, 'g4s0'))
+        expect(await next()).toBe('g4s0')
+        transport.openIncomingUniStream(subgroup(4n, 1n, 'g4s1')).close()
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        expect(closed).toEqual([])
+
+        first.close()
+        expect(await next()).toBe('g4s1')
+        await vi.waitFor(() => expect(closed).toEqual(['4:0', '4:1']))
+
+        await client.disconnect()
+      })
+
+      it('delivers in arrival order unless asked', async () => {
+        const { client, transport, closed, next } = await subscribed(false)
+
+        const first = transport.openIncomingUniStream(subgroup(4n, 0n, 'g4s0'))
+        expect(await next()).toBe('g4s0')
+        transport.openIncomingUniStream(subgroup(4n, 1n, 'g4s1')).close()
+        expect(await next()).toBe('g4s1')
+        await vi.waitFor(() => expect(closed).toEqual(['4:1']))
+        first.close()
+        await vi.waitFor(() => expect(closed).toEqual(['4:1', '4:0']))
+
+        await client.disconnect()
+      })
+
+      it('drops a subgroup stream for a group before an absolute start', async () => {
+        const { client, transport, next } = await subscribed(
+          true,
+          new LocationFilter(LocationFilterType.AbsoluteStart, 5n, 0n),
+        )
+
+        transport.openIncomingUniStream(subgroup(4n, 0n, 'stale'))
+        await vi.waitFor(() => expect(transport.uniCancelReasons).toHaveLength(1))
+        expect(streamResetCodeOf(transport.uniCancelReasons[0])).toBe(StreamResetCode.Cancelled)
+        transport.openIncomingUniStream(subgroup(5n, 0n, 'g5s0')).close()
+        expect(await next()).toBe('g5s0')
+
+        await client.disconnect()
+      })
     })
 
     it('holds a data stream that outran the control message naming its track alias', async () => {
