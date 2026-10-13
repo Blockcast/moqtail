@@ -168,14 +168,26 @@ export function tokenAliasTypeFromNumber(value: number): TokenAliasType {
 if (import.meta.vitest) {
   const { describe, test } = import.meta.vitest
 
-  // Asserted against dev/conformance/draft22/, which is shared with moqtail-rs. These
-  // enums have no tryFrom, so the lookup uses the enum's own reverse mapping.
+  // Asserted against dev/conformance/draft22/, which is shared with moqtail-rs.
   describe('draft-22 conformance', () => {
     const fixture = async () => await import('../../../test/conformance')
+    // Ask the lookups the wire path uses, not the enums' reverse mappings. A reverse
+    // mapping answers from the enum alone, so a member declared and then left out of
+    // its switch would read as conforming while the wire rejects that codepoint.
+    // moqtail-rs asserts through `try_from` for the same reason.
+    const nameVia =
+      <T extends number>(from: (value: number) => T, names: Record<number, string>) =>
+      (codepoint: bigint): string | undefined => {
+        try {
+          return names[from(Number(codepoint))]
+        } catch {
+          return undefined
+        }
+      }
 
     test('SetupOptionType matches parameter_types.json', async () => {
       const { parameterTypes, assertRegistry, pascalIdent } = await fixture()
-      assertRegistry(parameterTypes().setup_options, pascalIdent(), (codepoint) => SetupOptionType[Number(codepoint)])
+      assertRegistry(parameterTypes().setup_options, pascalIdent(), nameVia(setupOptionTypeFromNumber, SetupOptionType))
     })
 
     test('MessageParameterType matches parameter_types.json', async () => {
@@ -183,7 +195,7 @@ if (import.meta.vitest) {
       assertRegistry(
         parameterTypes().message_parameters,
         pascalIdent({ OBJECTID_FILTER: 'ObjectIdFilter' }),
-        (codepoint) => MessageParameterType[Number(codepoint)],
+        nameVia(messageParameterTypeFromNumber, MessageParameterType),
       )
     })
   })
