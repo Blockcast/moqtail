@@ -15,7 +15,7 @@
  */
 
 import { ByteBuffer, FrozenByteBuffer, BaseByteBuffer } from '../common/byte_buffer'
-import { ControlMessageType } from './constant'
+import { ControlMessageType, MoqtVersion } from './constant'
 import { Location } from '../common/location'
 import { LengthExceedsMaxError, NotEnoughBytesError, ProtocolViolationError } from '../error/error'
 import {
@@ -45,14 +45,19 @@ export class FetchOk {
     return ControlMessageType.FetchOk
   }
 
-  serialize(): FrozenByteBuffer {
+  serialize(version: MoqtVersion = MoqtVersion.DEFAULT): FrozenByteBuffer {
     const buf = new ByteBuffer()
     buf.putVI(BigInt(ControlMessageType.FetchOk))
     const payload = new ByteBuffer()
     payload.putU8(this.endOfTrack ? 1 : 0)
     payload.putLocation(this.endLocation)
     payload.putVI(this.parameters.length)
-    payload.putBytes(serializeMessageParameterKvps(this.parameters.map((p) => p.toKeyValuePair())).toUint8Array())
+    payload.putBytes(
+      serializeMessageParameterKvps(
+        this.parameters.map((p) => p.toKeyValuePair()),
+        version,
+      ).toUint8Array(),
+    )
     TrackProperty.serializeInto(this.trackProperties, payload)
     const payloadBytes = payload.toUint8Array()
     if (payloadBytes.length > 0xffff) {
@@ -63,7 +68,7 @@ export class FetchOk {
     return buf.freeze()
   }
 
-  static parsePayload(buf: BaseByteBuffer): FetchOk {
+  static parsePayload(buf: BaseByteBuffer, version: MoqtVersion = MoqtVersion.DEFAULT): FetchOk {
     if (buf.remaining < 1) {
       throw new NotEnoughBytesError('FetchOk::parsePayload(endOfTrack)', 1, 0)
     }
@@ -81,7 +86,7 @@ export class FetchOk {
     }
     const endLocation = buf.getLocation()
     const paramCount = buf.getNumberVI()
-    const rawParams = deserializeMessageParameterKvps(buf, paramCount)
+    const rawParams = deserializeMessageParameterKvps(buf, paramCount, version)
     const parameters = MessageParameters.fromKeyValuePairs(rawParams)
     const trackProperties = TrackProperty.deserializeAll(buf)
     return new FetchOk(endOfTrack, endLocation, parameters, trackProperties)

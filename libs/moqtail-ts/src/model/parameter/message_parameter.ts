@@ -17,8 +17,8 @@
 import { KeyValuePair, deserializeKvpList, isBytes, isVarInt, serializeKvpList } from '../common/pair'
 import { BaseByteBuffer, ByteBuffer, FrozenByteBuffer } from '../common/byte_buffer'
 import { greaseValue } from '../common/grease'
-import { ProtocolViolationError } from '../error/error'
-import { GroupOrder, LocationFilterType, SwitchMode } from '../control/constant'
+import { KeyValueFormattingError, ProtocolViolationError } from '../error/error'
+import { GroupOrder, LocationFilterType, MoqtVersion, SwitchMode } from '../control/constant'
 import { MessageParameterType } from './constant'
 import { Location } from '../common'
 import { AuthorizationToken } from './common'
@@ -316,58 +316,139 @@ function valueShapeOf(typeValue: bigint): ValueShape {
  * Serializes a list of message-parameter KVPs, delta-encoding the Types.
  * Mirrors {@link serializeKvpList} but honours per-parameter value encodings.
  */
-export function serializeMessageParameterKvps(items: KeyValuePair[]): FrozenByteBuffer {
+export function serializeMessageParameterKvps(
+  items: KeyValuePair[],
+  version: MoqtVersion = MoqtVersion.DEFAULT,
+): FrozenByteBuffer {
   const sorted = [...items].sort((a, b) => (a.typeValue < b.typeValue ? -1 : a.typeValue > b.typeValue ? 1 : 0))
   const buf = new ByteBuffer()
   let prevType = 0n
   for (const kvp of sorted) {
     buf.putVI(kvp.typeValue - prevType)
-    switch (valueShapeOf(kvp.typeValue)) {
-      case ValueShape.Uint8:
-        if (!isVarInt(kvp) || kvp.value < 0n || kvp.value > 255n) {
-          throw new ProtocolViolationError(
-            'serializeMessageParameterKvps',
-            `uint8 parameter 0x${kvp.typeValue.toString(16)} value ${kvp.value} exceeds 255`,
-          )
-        }
-        buf.putU8(Number(kvp.value))
-        break
-      case ValueShape.BareLocation:
-      case ValueShape.LocationFilter:
-        if (isBytes(kvp)) buf.putBytes(kvp.value)
-        break
-      case ValueShape.LengthPrefixedBytes:
-        if (isBytes(kvp)) buf.putLengthPrefixedBytes(kvp.value)
-        break
-      case ValueShape.VarInt:
-        if (isVarInt(kvp)) buf.putVI(kvp.value)
-        break
-    }
+    writeMessageParameterValue(buf, kvp, version)
     prevType = kvp.typeValue
   }
   return buf.freeze()
 }
 
 /**
+ * Writes one parameter Value, which is held in its draft-22 form, for the wire of
+ * `version`. The Type has already been written.
+ */
+function writeMessageParameterValue(buf: ByteBuffer, kvp: KeyValuePair, version: MoqtVersion): void {
+  if (version === MoqtVersion.Draft20 && isDraft20Specific(kvp.typeValue)) {
+    if (!isBytes(kvp))
+      throw new ProtocolViolationError(
+        'writeMessageParameterValue',
+        `parameter 0x${kvp.typeValue.toString(16)} must be bytes-valued`,
+      )
+    buf.putLengthPrefixedBytes(
+      kvp.typeValue === BigInt(MessageParameterType.LocationFilter)
+        ? LocationFilter.deserializeValue(new FrozenByteBuffer(kvp.value)).serializeDraft20Value()
+        : transcodeParameterList(kvp.value, MoqtVersion.Draft22, MoqtVersion.Draft20),
+    )
+    return
+  }
+  switch (valueShapeOf(kvp.typeValue)) {
+    case ValueShape.Uint8:
+      if (!isVarInt(kvp) || kvp.value < 0n || kvp.value > 255n) {
+        throw new ProtocolViolationError(
+          'serializeMessageParameterKvps',
+          `uint8 parameter 0x${kvp.typeValue.toString(16)} value ${kvp.value} exceeds 255`,
+        )
+      }
+      buf.putU8(Number(kvp.value))
+      break
+    case ValueShape.BareLocation:
+    case ValueShape.LocationFilter:
+      if (isBytes(kvp)) buf.putBytes(kvp.value)
+      break
+    case ValueShape.LengthPrefixedBytes:
+      if (isBytes(kvp)) buf.putLengthPrefixedBytes(kvp.value)
+      break
+    case ValueShape.VarInt:
+      if (isVarInt(kvp)) buf.putVI(kvp.value)
+      break
+  }
+}
+
+/**
+ * The parameters whose wire form differs between draft-20 and draft-22: LOCATION_FILTER
+ * itself, and FILL_PARAMETERS, which can carry one. Draft-20 defines LOCATION_FILTER as
+ * length-prefixed (draft-20 §10.2.9) and infers its form from the number of fields.
+ * Draft-22 writes a Location Filter Type and no length (§9.20.9).
+ */
+function isDraft20Specific(typeValue: bigint): boolean {
+  return (
+    typeValue === BigInt(MessageParameterType.LocationFilter) ||
+    typeValue === BigInt(MessageParameterType.FillParameters)
+  )
+}
+
+/**
+ * Re-encodes a delta-coded parameter list, as FILL_PARAMETERS carries one, from the wire
+ * of one version to another's.
+ */
+function transcodeParameterList(value: Uint8Array, from: MoqtVersion, to: MoqtVersion): Uint8Array {
+  const items = readMessageParameterKvps(new FrozenByteBuffer(value), (buf) => buf.remaining > 0, from)
+  const out = new ByteBuffer()
+  let prevType = 0n
+  for (const kvp of items) {
+    out.putVI(kvp.typeValue - prevType)
+    writeMessageParameterValue(out, kvp, to)
+    prevType = kvp.typeValue
+  }
+  return out.toUint8Array()
+}
+
+/**
  * Reads exactly `count` delta-encoded message-parameter KVPs.
  * Mirrors {@link deserializeKvpList} but honours per-parameter value encodings.
  */
-export function deserializeMessageParameterKvps(buf: BaseByteBuffer, count: number | bigint): KeyValuePair[] {
+export function deserializeMessageParameterKvps(
+  buf: BaseByteBuffer,
+  count: number | bigint,
+  version: MoqtVersion = MoqtVersion.DEFAULT,
+): KeyValuePair[] {
   const n = typeof count === 'bigint' ? Number(count) : count
   let read = 0
-  return readMessageParameterKvps(buf, () => read++ < n)
+  return readMessageParameterKvps(buf, () => read++ < n, version)
 }
 
 /** Reads delta-encoded message-parameter KVPs until `buf` is exhausted. */
-export function deserializeMessageParameterKvpsUntilEmpty(buf: BaseByteBuffer): KeyValuePair[] {
-  return readMessageParameterKvps(buf, () => buf.remaining > 0)
+export function deserializeMessageParameterKvpsUntilEmpty(
+  buf: BaseByteBuffer,
+  version: MoqtVersion = MoqtVersion.DEFAULT,
+): KeyValuePair[] {
+  return readMessageParameterKvps(buf, () => buf.remaining > 0, version)
 }
 
-function readMessageParameterKvps(buf: BaseByteBuffer, more: () => boolean): KeyValuePair[] {
+/**
+ * Reads parameter KVPs while `more` says so. Each value is returned in its draft-22
+ * form whatever `version` it was read in, so a parameter has one form to decode.
+ */
+function readMessageParameterKvps(
+  buf: BaseByteBuffer,
+  more: (buf: BaseByteBuffer) => boolean,
+  version: MoqtVersion,
+): KeyValuePair[] {
   const items: KeyValuePair[] = []
   let prevType = 0n
-  while (more()) {
+  while (more(buf)) {
     const typeValue = prevType + buf.getVI()
+    prevType = typeValue
+    if (version === MoqtVersion.Draft20 && isDraft20Specific(typeValue)) {
+      const value = buf.getLengthPrefixedBytes()
+      items.push(
+        KeyValuePair.newBytes(
+          typeValue,
+          typeValue === BigInt(MessageParameterType.LocationFilter)
+            ? LocationFilter.deserializeDraft20Value(value).serializeValue()
+            : transcodeParameterList(value, MoqtVersion.Draft20, MoqtVersion.Draft22),
+        ),
+      )
+      continue
+    }
     switch (valueShapeOf(typeValue)) {
       case ValueShape.Uint8:
         items.push(KeyValuePair.newVarInt(typeValue, BigInt(buf.getU8())))
@@ -390,7 +471,6 @@ function readMessageParameterKvps(buf: BaseByteBuffer, more: () => boolean): Key
         items.push(KeyValuePair.tryNewVarInt(typeValue, buf.getVI()))
         break
     }
-    prevType = typeValue
   }
   return items
 }
@@ -745,6 +825,82 @@ if (import.meta.vitest) {
       ]
       applyMessageParameterUpdate(current, [new RangeFilter(RangeFilterKind.Priority)])
       expect(current).toEqual([filter(RangeFilterKind.ObjectId, 0, 0n, 3n)])
+    })
+  })
+
+  describe('message parameters by version', () => {
+    const vi = (value: bigint) => {
+      const buf = new ByteBuffer()
+      buf.putVI(value)
+      return Array.from(buf.toUint8Array())
+    }
+
+    /**
+     * A LOCATION_FILTER at top level and one inside FILL_PARAMETERS. The two encodings
+     * coincide byte for byte when every field is a one-byte varint and the filter is not
+     * the Next Object, so this uses a two-byte StartGroup and a Next Object filter.
+     */
+    function versionedList() {
+      const params: MessageParameter[] = [
+        new LocationFilter(LocationFilterType.AbsoluteStart, 1000n, 2n),
+        new FillParameters([new LocationFilter(LocationFilterType.NextObject)]),
+      ]
+      const group = vi(1000n)
+      // Draft-20: LOCATION_FILTER is length-prefixed and its Length implies the form.
+      const draft20 = [0x21, group.length + 1, ...group, 0x02, 0x02, 0x04, 0x21, 0x02, 0x00, 0x00]
+      // Draft-22: a Location Filter Type (0x02 Absolute Start, 0x05 Next Object), no length.
+      const draft22 = [0x21, 0x02, ...group, 0x02, 0x02, 0x02, 0x21, 0x05]
+      return { params, draft20, draft22 }
+    }
+
+    const write = (params: MessageParameter[], version?: MoqtVersion) =>
+      Array.from(
+        serializeMessageParameterKvps(
+          params.map((p) => p.toKeyValuePair()),
+          version,
+        ).toUint8Array(),
+      )
+    const read = (bytes: number[], version: MoqtVersion) =>
+      MessageParameters.fromKeyValuePairs(
+        deserializeMessageParameterKvps(new FrozenByteBuffer(new Uint8Array(bytes)), 2, version),
+      )
+
+    test('each version writes and reads its own LOCATION_FILTER', () => {
+      const { params, draft20, draft22 } = versionedList()
+      for (const [version, wire] of [
+        [MoqtVersion.Draft20, draft20],
+        [MoqtVersion.Draft22, draft22],
+      ] as const) {
+        expect(write(params, version)).toEqual(wire)
+        expect(read(wire, version)).toEqual(params)
+      }
+      expect(write(params)).toEqual(draft22)
+    })
+
+    test("neither version reads the other's LOCATION_FILTER as the same list", () => {
+      const { params, draft20, draft22 } = versionedList()
+      for (const [version, wire] of [
+        [MoqtVersion.Draft22, draft20],
+        [MoqtVersion.Draft20, draft22],
+      ] as const) {
+        let parsed: MessageParameter[] | undefined
+        try {
+          parsed = read(wire, version)
+        } catch {
+          parsed = undefined
+        }
+        expect(parsed).not.toEqual(params)
+      }
+    })
+
+    test('a draft-20 LOCATION_FILTER with five fields is a KEY_VALUE_FORMATTING_ERROR', () => {
+      expect(() =>
+        deserializeMessageParameterKvps(
+          new FrozenByteBuffer(new Uint8Array([0x21, 0x05, 1, 2, 3, 4, 5])),
+          1,
+          MoqtVersion.Draft20,
+        ),
+      ).toThrow(KeyValueFormattingError)
     })
   })
 }

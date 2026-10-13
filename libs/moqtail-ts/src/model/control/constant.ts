@@ -14,12 +14,58 @@
  * limitations under the License.
  */
 
-import { InvalidEnumValue, StreamResetCode } from '../error'
+import { InvalidEnumValue, ProtocolViolationError, StreamResetCode } from '../error'
 import { greaseValue } from '../common/grease'
 /**
- * Protocol string array exchanged in wt-available-protocols header
+ * @public
+ * A MOQT version this package speaks, named by its ALPN token (§6.2).
+ *
+ * The version is fixed by the handshake, never inferred from the bytes. Draft-20 and
+ * draft-22 differ on the wire only in LOCATION_FILTER (§9.20.9): draft-20
+ * length-prefixes it and infers its form from the number of fields, draft-22 writes a
+ * Location Filter Type and no length. Everything else is shared.
  */
-export const SUPPORTED_VERSIONS = ['moqt-22']
+export enum MoqtVersion {
+  Draft22 = 'moqt-22',
+  Draft20 = 'moqt-20',
+}
+
+/**
+ * @public
+ */
+export namespace MoqtVersion {
+  /** The version used when none was negotiated. */
+  export const DEFAULT: MoqtVersion = MoqtVersion.Draft22
+
+  /** The version an ALPN token names, or `undefined` if this package does not speak it. */
+  export function fromAlpn(protocol: string): MoqtVersion | undefined {
+    return SUPPORTED_VERSIONS.find((v) => v === protocol)
+  }
+
+  /**
+   * The version a session speaks, given the protocol the server selected
+   * (`WebTransport.protocol`). An empty or absent protocol means the server selected
+   * none, and the session speaks {@link (MoqtVersion:namespace).DEFAULT}, as before protocols were
+   * negotiated. A protocol this package does not speak cannot be followed.
+   *
+   * @throws :{@link ProtocolViolationError} When the server selected a protocol that is
+   * no supported MOQT version.
+   */
+  export function negotiated(protocol: string | undefined): MoqtVersion {
+    if (!protocol) return DEFAULT
+    const version = fromAlpn(protocol)
+    if (version === undefined)
+      throw new ProtocolViolationError('MoqtVersion.negotiated', `server selected unsupported protocol ${protocol}`)
+    return version
+  }
+}
+
+/**
+ * Every supported version, in order of preference, as offered in the
+ * wt-available-protocols header. A server picks the first one it also supports, so
+ * draft-22 is used whenever both ends speak it.
+ */
+export const SUPPORTED_VERSIONS: MoqtVersion[] = [MoqtVersion.Draft22, MoqtVersion.Draft20]
 
 /**
  * @public
@@ -436,6 +482,22 @@ if (import.meta.vitest) {
   // as. The loader is imported dynamically so it stays out of the published bundle.
   describe('draft-22 conformance', () => {
     const fixture = async () => await import('../../../test/conformance')
+
+    test('offers draft-22 first, then draft-20', () => {
+      expect(SUPPORTED_VERSIONS).toEqual(['moqt-22', 'moqt-20'])
+      expect(MoqtVersion.DEFAULT).toBe(MoqtVersion.Draft22)
+      for (const v of SUPPORTED_VERSIONS) expect(MoqtVersion.fromAlpn(v)).toBe(v)
+      for (const other of ['moqt-18', 'moqt-21', 'h3', '']) expect(MoqtVersion.fromAlpn(other)).toBeUndefined()
+    })
+
+    test('the session speaks the version the server selected', () => {
+      expect(MoqtVersion.negotiated('moqt-20')).toBe(MoqtVersion.Draft20)
+      expect(MoqtVersion.negotiated('moqt-22')).toBe(MoqtVersion.Draft22)
+      // A server that selects nothing predates protocol negotiation.
+      expect(MoqtVersion.negotiated('')).toBe(MoqtVersion.Draft22)
+      expect(MoqtVersion.negotiated(undefined)).toBe(MoqtVersion.Draft22)
+      expect(() => MoqtVersion.negotiated('moqt-18')).toThrow(ProtocolViolationError)
+    })
 
     test('ControlMessageType matches message_types.json', async () => {
       const { messageTypes, assertRegistry, pascalIdent } = await fixture()

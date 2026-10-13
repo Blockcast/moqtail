@@ -15,7 +15,7 @@
  */
 
 import { BaseByteBuffer, ByteBuffer, FrozenByteBuffer } from '../common/byte_buffer'
-import { ControlMessageType, LocationFilterType } from './constant'
+import { ControlMessageType, LocationFilterType, MoqtVersion } from './constant'
 import { LengthExceedsMaxError } from '../error/error'
 import { FullTrackName } from '../data'
 import {
@@ -46,14 +46,19 @@ export class Fetch {
     return ControlMessageType.Fetch
   }
 
-  serialize(): FrozenByteBuffer {
+  serialize(version: MoqtVersion = MoqtVersion.DEFAULT): FrozenByteBuffer {
     const buf = new ByteBuffer()
     buf.putVI(ControlMessageType.Fetch)
     const payload = new ByteBuffer()
     payload.putVI(this.requestId)
     payload.putFullTrackName(this.fullTrackName)
     payload.putVI(this.parameters.length)
-    payload.putBytes(serializeMessageParameterKvps(this.parameters.map((p) => p.toKeyValuePair())).toUint8Array())
+    payload.putBytes(
+      serializeMessageParameterKvps(
+        this.parameters.map((p) => p.toKeyValuePair()),
+        version,
+      ).toUint8Array(),
+    )
     const payloadBytes = payload.toUint8Array()
     if (payloadBytes.length > 0xffff) {
       throw new LengthExceedsMaxError('Fetch::serialize(payload_length)', 0xffff, payloadBytes.length)
@@ -63,12 +68,12 @@ export class Fetch {
     return buf.freeze()
   }
 
-  static parsePayload(buf: BaseByteBuffer): Fetch {
+  static parsePayload(buf: BaseByteBuffer, version: MoqtVersion = MoqtVersion.DEFAULT): Fetch {
     const requestId = buf.getVI()
     const fullTrackName = buf.getFullTrackName()
 
     const paramCount = buf.getNumberVI()
-    const rawParams = deserializeMessageParameterKvps(buf, paramCount)
+    const rawParams = deserializeMessageParameterKvps(buf, paramCount, version)
     const parameters = MessageParameters.fromKeyValuePairs(rawParams)
 
     return new Fetch(requestId, fullTrackName, parameters)

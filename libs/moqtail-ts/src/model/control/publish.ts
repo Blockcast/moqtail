@@ -16,7 +16,7 @@
 
 import { BaseByteBuffer, ByteBuffer, FrozenByteBuffer } from '../common/byte_buffer'
 import { LengthExceedsMaxError } from '../error/error'
-import { ControlMessageType } from './constant'
+import { ControlMessageType, MoqtVersion } from './constant'
 import { FullTrackName } from '../data'
 import {
   MessageParameter,
@@ -41,7 +41,7 @@ export class Publish {
     return ControlMessageType.Publish
   }
 
-  serialize(): FrozenByteBuffer {
+  serialize(version: MoqtVersion = MoqtVersion.DEFAULT): FrozenByteBuffer {
     const buf = new ByteBuffer()
     buf.putVI(ControlMessageType.Publish)
     const payload = new ByteBuffer()
@@ -49,7 +49,12 @@ export class Publish {
     payload.putBytes(this.fullTrackName.serialize().toUint8Array())
     payload.putVI(this.trackAlias)
     payload.putVI(this.parameters.length)
-    payload.putBytes(serializeMessageParameterKvps(this.parameters.map((p) => p.toKeyValuePair())).toUint8Array())
+    payload.putBytes(
+      serializeMessageParameterKvps(
+        this.parameters.map((p) => p.toKeyValuePair()),
+        version,
+      ).toUint8Array(),
+    )
     TrackProperty.serializeInto(this.trackProperties, payload)
     const payloadBytes = payload.toUint8Array()
     if (payloadBytes.length > 0xffff) {
@@ -60,12 +65,12 @@ export class Publish {
     return buf.freeze()
   }
 
-  static parsePayload(buf: BaseByteBuffer): Publish {
+  static parsePayload(buf: BaseByteBuffer, version: MoqtVersion = MoqtVersion.DEFAULT): Publish {
     const requestId = buf.getVI()
     const fullTrackName = buf.getFullTrackName()
     const trackAlias = buf.getVI()
     const paramCount = buf.getNumberVI()
-    const rawParams = deserializeMessageParameterKvps(buf, paramCount)
+    const rawParams = deserializeMessageParameterKvps(buf, paramCount, version)
     const parameters = MessageParameters.fromKeyValuePairs(rawParams)
     const trackProperties = TrackProperty.deserializeAll(buf)
     return new Publish(requestId, fullTrackName, trackAlias, parameters, trackProperties)

@@ -15,7 +15,7 @@
  */
 import { BaseByteBuffer, ByteBuffer, FrozenByteBuffer } from '../common/byte_buffer'
 import { Tuple } from '../common/tuple'
-import { ControlMessageType, GroupOrder, LocationFilterType } from '../control/constant'
+import { ControlMessageType, GroupOrder, LocationFilterType, MoqtVersion } from '../control/constant'
 import { FullTrackName } from '../data'
 import {
   MessageParameter,
@@ -42,7 +42,7 @@ export class TrackStatus {
     return ControlMessageType.TrackStatus
   }
 
-  serialize(): FrozenByteBuffer {
+  serialize(version: MoqtVersion = MoqtVersion.DEFAULT): FrozenByteBuffer {
     const buf = new ByteBuffer()
     buf.putVI(ControlMessageType.TrackStatus)
 
@@ -57,7 +57,10 @@ export class TrackStatus {
 
     payload.putVI(this.subscribeParameters.length)
     payload.putBytes(
-      serializeMessageParameterKvps(this.subscribeParameters.map((p) => p.toKeyValuePair())).toUint8Array(),
+      serializeMessageParameterKvps(
+        this.subscribeParameters.map((p) => p.toKeyValuePair()),
+        version,
+      ).toUint8Array(),
     )
 
     const payloadBytes = payload.toUint8Array()
@@ -67,7 +70,7 @@ export class TrackStatus {
     return buf.freeze()
   }
 
-  static parsePayload(buf: BaseByteBuffer): TrackStatus {
+  static parsePayload(buf: BaseByteBuffer, version: MoqtVersion = MoqtVersion.DEFAULT): TrackStatus {
     const requestId = buf.getVI()
     const trackAlias = buf.getVI()
     const fullTrackName = buf.getFullTrackName()
@@ -77,7 +80,7 @@ export class TrackStatus {
     const locationFilter = LocationFilter.deserializeValue(buf)
 
     const paramCount = Number(buf.getVI())
-    const rawParams = deserializeMessageParameterKvps(buf, paramCount)
+    const rawParams = deserializeMessageParameterKvps(buf, paramCount, version)
     const subscribeParameters = MessageParameters.fromKeyValuePairs(rawParams)
 
     return new TrackStatus(

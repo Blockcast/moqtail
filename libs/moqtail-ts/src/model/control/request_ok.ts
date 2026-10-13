@@ -16,7 +16,7 @@
 
 import { BaseByteBuffer, ByteBuffer, FrozenByteBuffer } from '../common/byte_buffer'
 
-import { ControlMessageType } from './constant'
+import { ControlMessageType, MoqtVersion } from './constant'
 import { CastingError, LengthExceedsMaxError, ProtocolViolationError } from '../error/error'
 import {
   MessageParameter,
@@ -74,14 +74,19 @@ export class RequestOk {
     }
   }
 
-  serialize(): FrozenByteBuffer {
+  serialize(version: MoqtVersion = MoqtVersion.DEFAULT): FrozenByteBuffer {
     const buf = new ByteBuffer()
     buf.putVI(ControlMessageType.RequestOk)
 
     const payload = new ByteBuffer()
     payload.putVI(BigInt(this.parameters.length))
 
-    payload.putBytes(serializeMessageParameterKvps(this.parameters.map((p) => p.toKeyValuePair())).toUint8Array())
+    payload.putBytes(
+      serializeMessageParameterKvps(
+        this.parameters.map((p) => p.toKeyValuePair()),
+        version,
+      ).toUint8Array(),
+    )
 
     // Track Properties span the remaining message length (no explicit count).
     TrackProperty.serializeInto(this.trackProperties, payload)
@@ -102,7 +107,7 @@ export class RequestOk {
    * parameters is read as Track Properties, so trailing bytes from a longer buffer would
    * be parsed as properties.
    */
-  static parsePayload(buf: BaseByteBuffer): RequestOk {
+  static parsePayload(buf: BaseByteBuffer, version: MoqtVersion = MoqtVersion.DEFAULT): RequestOk {
     const numParamsBig = buf.getVI()
     const numParams = Number(numParamsBig)
     if (BigInt(numParams) !== numParamsBig) {
@@ -110,7 +115,7 @@ export class RequestOk {
     }
 
     const parameters: MessageParameter[] = []
-    for (const kvp of deserializeMessageParameterKvps(buf, numParams)) {
+    for (const kvp of deserializeMessageParameterKvps(buf, numParams, version)) {
       const param = MessageParameter.fromKeyValuePair(kvp)
       if (param !== undefined) parameters.push(param)
     }

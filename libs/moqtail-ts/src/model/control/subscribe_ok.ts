@@ -15,7 +15,7 @@
  */
 
 import { BaseByteBuffer, ByteBuffer, FrozenByteBuffer } from '../common/byte_buffer'
-import { ControlMessageType } from './constant'
+import { ControlMessageType, MoqtVersion } from './constant'
 import { LengthExceedsMaxError } from '../error/error'
 import {
   MessageParameter,
@@ -59,14 +59,19 @@ export class SubscribeOk {
     return ControlMessageType.SubscribeOk
   }
 
-  serialize(): FrozenByteBuffer {
+  serialize(version: MoqtVersion = MoqtVersion.DEFAULT): FrozenByteBuffer {
     const buf = new ByteBuffer()
     buf.putVI(ControlMessageType.SubscribeOk)
 
     const payload = new ByteBuffer()
     payload.putVI(this.trackAlias)
     payload.putVI(this.parameters.length)
-    payload.putBytes(serializeMessageParameterKvps(this.parameters.map((p) => p.toKeyValuePair())).toUint8Array())
+    payload.putBytes(
+      serializeMessageParameterKvps(
+        this.parameters.map((p) => p.toKeyValuePair()),
+        version,
+      ).toUint8Array(),
+    )
     TrackProperty.serializeInto(this.trackProperties, payload)
     const payloadBytes = payload.toUint8Array()
     if (payloadBytes.length > 0xffff) {
@@ -77,10 +82,10 @@ export class SubscribeOk {
     return buf.freeze()
   }
 
-  static parsePayload(buf: BaseByteBuffer): SubscribeOk {
+  static parsePayload(buf: BaseByteBuffer, version: MoqtVersion = MoqtVersion.DEFAULT): SubscribeOk {
     const trackAlias = buf.getVI()
     const paramCount = buf.getNumberVI()
-    const rawParams = deserializeMessageParameterKvps(buf, paramCount)
+    const rawParams = deserializeMessageParameterKvps(buf, paramCount, version)
     const parameters = MessageParameters.fromKeyValuePairs(rawParams)
     const trackProperties = TrackProperty.deserializeAll(buf)
     return new SubscribeOk(trackAlias, parameters, trackProperties)

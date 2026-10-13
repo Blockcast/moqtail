@@ -17,7 +17,7 @@
 import { BaseByteBuffer, ByteBuffer, FrozenByteBuffer } from '../common/byte_buffer'
 import { Location } from '../common/location'
 
-import { ControlMessageType } from './constant'
+import { ControlMessageType, MoqtVersion } from './constant'
 import { CastingError, LengthExceedsMaxError } from '../error/error'
 import {
   MessageParameter,
@@ -53,13 +53,18 @@ export class PublishStateNotify {
     return ControlMessageType.PublishStateNotify
   }
 
-  serialize(): FrozenByteBuffer {
+  serialize(version: MoqtVersion = MoqtVersion.DEFAULT): FrozenByteBuffer {
     const buf = new ByteBuffer()
     buf.putVI(ControlMessageType.PublishStateNotify)
 
     const payload = new ByteBuffer()
     payload.putVI(this.parameters.length)
-    payload.putBytes(serializeMessageParameterKvps(this.parameters.map((p) => p.toKeyValuePair())).toUint8Array())
+    payload.putBytes(
+      serializeMessageParameterKvps(
+        this.parameters.map((p) => p.toKeyValuePair()),
+        version,
+      ).toUint8Array(),
+    )
 
     const payloadBytes = payload.toUint8Array()
     if (payloadBytes.length > 0xffff) {
@@ -71,7 +76,7 @@ export class PublishStateNotify {
     return buf.freeze()
   }
 
-  static parsePayload(buf: BaseByteBuffer): PublishStateNotify {
+  static parsePayload(buf: BaseByteBuffer, version: MoqtVersion = MoqtVersion.DEFAULT): PublishStateNotify {
     const paramCountBig = buf.getVI()
     const paramCount = Number(paramCountBig)
     if (BigInt(paramCount) !== paramCountBig) {
@@ -79,7 +84,7 @@ export class PublishStateNotify {
     }
 
     const parameters: MessageParameter[] = []
-    for (const kvp of deserializeMessageParameterKvps(buf, paramCount)) {
+    for (const kvp of deserializeMessageParameterKvps(buf, paramCount, version)) {
       const param = MessageParameter.fromKeyValuePair(kvp)
       if (param !== undefined) parameters.push(param)
     }

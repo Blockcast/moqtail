@@ -38,6 +38,7 @@ import {
   SubscribeOk,
   TrackStatus,
   ControlMessageType,
+  MoqtVersion,
   SUPPORTED_VERSIONS,
   PublishSkipped,
   PublishDone,
@@ -231,6 +232,8 @@ export class MOQtailClient {
   #serverSetup!: Setup
   /** How many filter ranges this client allows the server per request, as advertised in SETUP. */
   #maxFilterRanges: bigint = 0n
+  /** The MOQT version the server selected; every request stream is read and written in it. */
+  #version: MoqtVersion = MoqtVersion.DEFAULT
   /** Outgoing / incoming control message stream pair. */
   controlStream!: ControlStream
   /** Reader over incoming uni streams: the control recv half first, data streams after. */
@@ -432,6 +435,11 @@ export class MOQtailClient {
    *
    * @returns The {@link Setup} instance the server sent back during handshake.
    */
+  /** The MOQT version this session negotiated. */
+  get version(): MoqtVersion {
+    return this.#version
+  }
+
   get serverSetup(): Setup {
     return this.#serverSetup
   }
@@ -576,6 +584,8 @@ export class MOQtailClient {
 
     await client.webTransport.ready
     try {
+      client.#version = MoqtVersion.negotiated((client.webTransport as { protocol?: string }).protocol)
+      logger.log('MOQtailClient', `negotiated ${client.#version}`)
       if (callbacks?.onMessageSent) client.onMessageSent = callbacks.onMessageSent
       if (callbacks?.onMessageReceived) client.onMessageReceived = callbacks.onMessageReceived
       if (callbacks?.onSessionTerminated) client.onSessionTerminated = callbacks.onSessionTerminated
@@ -1895,7 +1905,7 @@ export class MOQtailClient {
       // No #openRequestStream here: NAMESPACE / NAMESPACE_DONE carry only a suffix, so
       // they are only meaningful next to the prefix that opened this stream. The generic
       // pump has no prefix to hand them, hence the bespoke drain below.
-      const requestStream = await RequestStream.open(this.webTransport, msg)
+      const requestStream = await RequestStream.open(this.webTransport, msg, this.#version)
       this.#requestStreams.set(msg.requestId, requestStream)
 
       logger.log(
@@ -1949,7 +1959,7 @@ export class MOQtailClient {
     assertWithinFilterRangeLimit(parameters ?? [], this.peerMaxFilterRanges, 'MOQtailClient.subscribeTracks')
     try {
       const msg = new SubscribeTracks(this.#nextClientRequestId, trackNamespacePrefix, parameters ?? [])
-      const requestStream = await RequestStream.open(this.webTransport, msg)
+      const requestStream = await RequestStream.open(this.webTransport, msg, this.#version)
       this.#requestStreams.set(msg.requestId, requestStream)
 
       const response = await requestStream.next()
@@ -2076,7 +2086,7 @@ export class MOQtailClient {
    * @param requestId - The requestId carried by `first`; the key the stream is filed under.
    */
   async #openRequestStream(requestId: bigint, first: ControlMessage): Promise<RequestStream> {
-    const requestStream = await RequestStream.open(this.webTransport, first)
+    const requestStream = await RequestStream.open(this.webTransport, first, this.#version)
     this.#requestStreams.set(requestId, requestStream)
     void this.#pumpRequestStream(requestId, requestStream)
     return requestStream
@@ -2271,7 +2281,7 @@ export class MOQtailClient {
       while (true) {
         const { value: biStream, done } = await reader.read()
         if (done) break
-        void this.#dispatchIncomingRequestStream(new RequestStream(biStream))
+        void this.#dispatchIncomingRequestStream(new RequestStream(biStream, this.#version))
       }
     })()
   }
@@ -2569,6 +2579,9 @@ if (import.meta.vitest) {
 
   class MockWebTransport {
     static last: MockWebTransport
+    /** The protocol the next mock server selects; '' selects none. */
+    static selectProtocol = ''
+    readonly protocol = MockWebTransport.selectProtocol
     readonly ready = Promise.resolve()
     readonly closed = new Promise<void>(() => {})
     readonly sentChunks: Uint8Array[] = []
@@ -2607,7 +2620,10 @@ if (import.meta.vitest) {
       return biStream
     }
 
-    constructor() {
+    constructor(
+      readonly url?: string,
+      readonly options?: WebTransportOptions & { protocols?: string[] },
+    ) {
       this.incomingBidirectionalStreams = new ReadableStream<WebTransportBidirectionalStream>({
         start: (controller) => {
           this.#incomingBi = controller
@@ -2687,6 +2703,27 @@ if (import.meta.vitest) {
       await client.disconnect()
     })
 
+    it('offers draft-22 then draft-20, and speaks the default when the server selects none', async () => {
+      const connecting = connect()
+      const transport = MockWebTransport.last
+      await vi.waitFor(() => expect(transport.sentChunks).toHaveLength(1))
+      transport.openIncomingUniStream(new Setup(new SetupOptions().build()).serialize().toUint8Array())
+      const client = await connecting
+
+      expect(transport.options?.protocols).toEqual(['moqt-22', 'moqt-20'])
+      expect(client.version).toBe(MoqtVersion.Draft22)
+      await client.disconnect()
+    })
+
+    it('fails a session whose server selected a protocol that is no MOQT version', async () => {
+      MockWebTransport.selectProtocol = 'moqt-18'
+      try {
+        await expect(connect()).rejects.toThrow('server selected unsupported protocol moqt-18')
+      } finally {
+        MockWebTransport.selectProtocol = ''
+      }
+    })
+
     it('rejects a peer control stream that does not begin with SETUP', async () => {
       const connecting = connect()
       const transport = MockWebTransport.last
@@ -2733,6 +2770,40 @@ if (import.meta.vitest) {
       })
       return transport.biStreams[index]!
     }
+
+    it('reads and writes request streams in the version the server selected', async () => {
+      for (const version of [MoqtVersion.Draft20, MoqtVersion.Draft22]) {
+        MockWebTransport.selectProtocol = version
+        try {
+          const { client, transport } = await connected()
+          expect(client.version).toBe(version)
+
+          const subscribing = client.subscribe({
+            fullTrackName: ftn,
+            locationFilter: new LocationFilter(LocationFilterType.NextObject),
+            forward: true,
+            groupOrder: GroupOrder.Original,
+            priority: 0,
+          })
+          const stream = await openedStream(transport, 0)
+          // The two versions write a Next Object filter differently, so the bytes on
+          // the wire say which one the client spoke.
+          const sent = ControlMessage.deserialize(new FrozenByteBuffer(stream.sentChunks[0]!), version) as Subscribe
+          expect(Array.from(sent.serialize(version).toUint8Array())).toEqual(Array.from(stream.sentChunks[0]!))
+          expect(sent.serialize(version).toUint8Array()).not.toEqual(
+            sent.serialize(version === MoqtVersion.Draft20 ? MoqtVersion.Draft22 : MoqtVersion.Draft20).toUint8Array(),
+          )
+          expect(sent.parameters.find((p) => p instanceof LocationFilter)).toEqual(
+            new LocationFilter(LocationFilterType.NextObject),
+          )
+          stream.respond(SubscribeOk.create(7n, [], []))
+          await subscribing
+          await client.disconnect()
+        } finally {
+          MockWebTransport.selectProtocol = ''
+        }
+      }
+    })
 
     it('opens a stream per request and answers each on the stream it came from', async () => {
       const { client, transport } = await connected()

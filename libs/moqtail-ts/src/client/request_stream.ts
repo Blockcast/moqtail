@@ -15,7 +15,7 @@
  */
 
 import { ControlMessage } from '../model/control/control_message'
-import { ControlMessageType } from '../model/control/constant'
+import { ControlMessageType, MoqtVersion } from '../model/control/constant'
 import { FrozenByteBuffer, ByteBuffer } from '../model/common/byte_buffer'
 import { NotEnoughBytesError, ProtocolViolationError, TerminationError } from '../model/error/error'
 import { TerminationCode } from '../model/error/constant'
@@ -49,8 +49,11 @@ export class RequestStream {
   #receiveBuffer: ByteBuffer
   /** Held for the stream's lifetime once {@link next} is first called. */
   #messageReader?: ReadableStreamDefaultReader<ControlMessage>
+  /** The version the session negotiated; every message on this stream is read and written in it. */
+  readonly version: MoqtVersion
 
-  constructor(biStream: WebTransportBidirectionalStream) {
+  constructor(biStream: WebTransportBidirectionalStream, version: MoqtVersion = MoqtVersion.DEFAULT) {
+    this.version = version
     this.#receiveBuffer = new ByteBuffer()
     this.#reader = biStream.readable.getReader()
     this.#writer = biStream.writable.getWriter()
@@ -67,14 +70,18 @@ export class RequestStream {
    * @throws :{@link ProtocolViolationError} If `first` is not one of the seven types
    * Table 5 marks `First`; those are the only ones allowed to open a request stream.
    */
-  static async open(webTransport: WebTransport, first: ControlMessage): Promise<RequestStream> {
+  static async open(
+    webTransport: WebTransport,
+    first: ControlMessage,
+    version: MoqtVersion = MoqtVersion.DEFAULT,
+  ): Promise<RequestStream> {
     if (!ControlMessageType.isFirst(first.getType()))
       throw new ProtocolViolationError(
         'RequestStream.open',
         `${first.constructor.name} may not open a request stream: only First-marked types can`,
       )
     const biStream = await webTransport.createBidirectionalStream()
-    const requestStream = new RequestStream(biStream)
+    const requestStream = new RequestStream(biStream, version)
     requestStream.first = first
     requestStream.openingType = first.getType()
     await requestStream.send(first)
@@ -96,7 +103,7 @@ export class RequestStream {
 
   async send(message: ControlMessage): Promise<void> {
     try {
-      const serialized = ControlMessage.serialize(message)
+      const serialized = ControlMessage.serialize(message, this.version)
       await this.#writer.ready
       await this.#writer.write(serialized.toUint8Array())
       logger.debug('request_stream', `sent ${message.constructor.name}`)
@@ -142,7 +149,7 @@ export class RequestStream {
           if (this.#receiveBuffer.length >= totalMessageSize) {
             const messageBytes = this.#receiveBuffer.getBytes(totalMessageSize)
             this.#receiveBuffer.commit()
-            const msg = ControlMessage.deserialize(new FrozenByteBuffer(messageBytes))
+            const msg = ControlMessage.deserialize(new FrozenByteBuffer(messageBytes), this.version)
             controller.enqueue(msg)
             continue
           }

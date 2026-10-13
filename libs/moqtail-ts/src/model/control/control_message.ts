@@ -15,7 +15,7 @@
  */
 
 import { FrozenByteBuffer } from '../common/byte_buffer'
-import { ControlMessageType } from './constant'
+import { ControlMessageType, MoqtVersion } from './constant'
 import { PublishSkipped } from './publish_skipped'
 import { PublishStateNotify } from './publish_state_notify'
 import { PublishNamespace } from './publish_namespace'
@@ -61,7 +61,8 @@ export type ControlMessage =
   | RequestOk
 
 export namespace ControlMessage {
-  export function deserialize(buf: FrozenByteBuffer): ControlMessage {
+  /** Reads one message in the wire of `version`, the one the session negotiated. */
+  export function deserialize(buf: FrozenByteBuffer, version: MoqtVersion = MoqtVersion.DEFAULT): ControlMessage {
     const messageTypeRaw = buf.getVI()
     const messageType = ControlMessageType.tryFrom(messageTypeRaw)
     const payloadLength = buf.getU16()
@@ -71,50 +72,51 @@ export namespace ControlMessage {
     const payload = new FrozenByteBuffer(payloadBytes)
     switch (messageType) {
       case ControlMessageType.Publish:
-        return Publish.parsePayload(payload)
+        return Publish.parsePayload(payload, version)
       case ControlMessageType.PublishDone:
         return PublishDone.parsePayload(payload)
       case ControlMessageType.PublishNamespace:
-        return PublishNamespace.parsePayload(payload)
+        return PublishNamespace.parsePayload(payload, version)
       case ControlMessageType.Namespace:
         return Namespace.parsePayload(payload)
       case ControlMessageType.NamespaceDone:
         return NamespaceDone.parsePayload(payload)
       case ControlMessageType.RequestOk:
-        return RequestOk.parsePayload(payload)
+        return RequestOk.parsePayload(payload, version)
       case ControlMessageType.RequestError:
         return RequestError.parsePayload(payload)
       case ControlMessageType.Fetch:
-        return Fetch.parsePayload(payload)
+        return Fetch.parsePayload(payload, version)
       case ControlMessageType.FetchOk:
-        return FetchOk.parsePayload(payload)
+        return FetchOk.parsePayload(payload, version)
       case ControlMessageType.GoAway:
         return GoAway.parsePayload(payload)
       case ControlMessageType.Subscribe:
-        return Subscribe.parsePayload(payload)
+        return Subscribe.parsePayload(payload, version)
       case ControlMessageType.SubscribeOk:
-        return SubscribeOk.parsePayload(payload)
+        return SubscribeOk.parsePayload(payload, version)
       case ControlMessageType.RequestUpdate:
-        return RequestUpdate.parsePayload(payload)
+        return RequestUpdate.parsePayload(payload, version)
       case ControlMessageType.TrackStatus:
-        return TrackStatus.parsePayload(payload)
+        return TrackStatus.parsePayload(payload, version)
       case ControlMessageType.SubscribeNamespace:
-        return SubscribeNamespace.parsePayload(payload)
+        return SubscribeNamespace.parsePayload(payload, version)
       case ControlMessageType.SubscribeTracks:
-        return SubscribeTracks.parsePayload(payload)
+        return SubscribeTracks.parsePayload(payload, version)
       case ControlMessageType.Setup:
         return Setup.parsePayload(payload)
       case ControlMessageType.PublishSkipped:
         return PublishSkipped.parsePayload(payload)
       case ControlMessageType.PublishStateNotify:
-        return PublishStateNotify.parsePayload(payload)
+        return PublishStateNotify.parsePayload(payload, version)
       default:
         throw new Error(`Unknown or unhandled ControlMessageType: ${messageType}`)
     }
   }
 
-  export function serialize(msg: ControlMessage): FrozenByteBuffer {
-    return msg.serialize()
+  /** Writes `msg` in the wire of `version`, the one the session negotiated. */
+  export function serialize(msg: ControlMessage, version: MoqtVersion = MoqtVersion.DEFAULT): FrozenByteBuffer {
+    return msg.serialize(version)
   }
 }
 

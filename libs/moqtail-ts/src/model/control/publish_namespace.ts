@@ -15,7 +15,7 @@
  */
 import { BaseByteBuffer, ByteBuffer, FrozenByteBuffer } from '../common/byte_buffer'
 import { Tuple } from '../common/tuple'
-import { ControlMessageType } from './constant'
+import { ControlMessageType, MoqtVersion } from './constant'
 import { NotEnoughBytesError, LengthExceedsMaxError } from '../error/error'
 import {
   MessageParameter,
@@ -62,7 +62,7 @@ export class PublishNamespace {
    * @returns The serialized buffer.
    * @throws :{@link LengthExceedsMaxError} If the payload exceeds 65535 bytes.
    */
-  serialize(): FrozenByteBuffer {
+  serialize(version: MoqtVersion = MoqtVersion.DEFAULT): FrozenByteBuffer {
     const buf = new ByteBuffer()
     buf.putVI(ControlMessageType.PublishNamespace)
 
@@ -70,7 +70,12 @@ export class PublishNamespace {
     payload.putVI(this.requestId)
     payload.putTuple(this.trackNamespace)
     payload.putVI(this.parameters.length)
-    payload.putBytes(serializeMessageParameterKvps(this.parameters.map((p) => p.toKeyValuePair())).toUint8Array())
+    payload.putBytes(
+      serializeMessageParameterKvps(
+        this.parameters.map((p) => p.toKeyValuePair()),
+        version,
+      ).toUint8Array(),
+    )
     const payloadBytes = payload.toUint8Array()
     if (payloadBytes.length > 0xffff) {
       throw new LengthExceedsMaxError('PublishNamespace::serialize(payloadBytes.length)', 0xffff, payloadBytes.length)
@@ -88,11 +93,11 @@ export class PublishNamespace {
    * @returns The parsed PublishNamespace message.
    * @throws :{@link NotEnoughBytesError} If the buffer does not contain enough bytes.
    */
-  static parsePayload(buf: BaseByteBuffer): PublishNamespace {
+  static parsePayload(buf: BaseByteBuffer, version: MoqtVersion = MoqtVersion.DEFAULT): PublishNamespace {
     const requestId = buf.getVI()
     const trackNamespace = buf.getTuple()
     const paramCount = buf.getNumberVI()
-    const rawParams = deserializeMessageParameterKvps(buf, paramCount)
+    const rawParams = deserializeMessageParameterKvps(buf, paramCount, version)
     const parameters = MessageParameters.fromKeyValuePairs(rawParams)
     return new PublishNamespace(requestId, trackNamespace, parameters)
   }

@@ -18,7 +18,7 @@ import { BaseByteBuffer, ByteBuffer, FrozenByteBuffer } from '../common/byte_buf
 import { Location } from '../common/location'
 import { Tuple } from '../common/tuple'
 
-import { ControlMessageType, GroupOrder, LocationFilterType } from '../control/constant'
+import { ControlMessageType, GroupOrder, LocationFilterType, MoqtVersion } from '../control/constant'
 import { FullTrackName } from '../data'
 import {
   MessageParameter,
@@ -40,7 +40,7 @@ export class Subscribe {
     return ControlMessageType.Subscribe
   }
 
-  serialize(): FrozenByteBuffer {
+  serialize(version: MoqtVersion = MoqtVersion.DEFAULT): FrozenByteBuffer {
     const buf = new ByteBuffer()
     buf.putVI(ControlMessageType.Subscribe)
 
@@ -49,7 +49,12 @@ export class Subscribe {
     payload.putBytes(this.fullTrackName.serialize().toUint8Array())
 
     payload.putVI(this.parameters.length)
-    payload.putBytes(serializeMessageParameterKvps(this.parameters.map((p) => p.toKeyValuePair())).toUint8Array())
+    payload.putBytes(
+      serializeMessageParameterKvps(
+        this.parameters.map((p) => p.toKeyValuePair()),
+        version,
+      ).toUint8Array(),
+    )
 
     const payloadBytes = payload.toUint8Array()
     buf.putU16(payloadBytes.length)
@@ -58,13 +63,13 @@ export class Subscribe {
     return buf.freeze()
   }
 
-  static parsePayload(buf: BaseByteBuffer): Subscribe {
+  static parsePayload(buf: BaseByteBuffer, version: MoqtVersion = MoqtVersion.DEFAULT): Subscribe {
     const requestId = buf.getVI()
     const fullTrackName = buf.getFullTrackName()
 
     const paramCount = Number(buf.getVI())
     const parameters: MessageParameter[] = []
-    for (const kvp of deserializeMessageParameterKvps(buf, paramCount)) {
+    for (const kvp of deserializeMessageParameterKvps(buf, paramCount, version)) {
       const param = MessageParameter.fromKeyValuePair(kvp)
       if (param !== undefined) parameters.push(param)
     }

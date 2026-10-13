@@ -17,7 +17,7 @@
 import { BaseByteBuffer, ByteBuffer, FrozenByteBuffer } from '../common/byte_buffer'
 import { Location } from '../common/location'
 
-import { ControlMessageType, LocationFilterType } from './constant'
+import { ControlMessageType, LocationFilterType, MoqtVersion } from './constant'
 import { CastingError, LengthExceedsMaxError } from '../error/error'
 import {
   MessageParameter,
@@ -37,7 +37,7 @@ export class RequestUpdate {
     return ControlMessageType.RequestUpdate
   }
 
-  serialize(): FrozenByteBuffer {
+  serialize(version: MoqtVersion = MoqtVersion.DEFAULT): FrozenByteBuffer {
     const buf = new ByteBuffer()
     buf.putVI(ControlMessageType.RequestUpdate)
 
@@ -45,7 +45,12 @@ export class RequestUpdate {
     payload.putVI(this.requestId)
     payload.putVI(this.parameters.length)
 
-    payload.putBytes(serializeMessageParameterKvps(this.parameters.map((p) => p.toKeyValuePair())).toUint8Array())
+    payload.putBytes(
+      serializeMessageParameterKvps(
+        this.parameters.map((p) => p.toKeyValuePair()),
+        version,
+      ).toUint8Array(),
+    )
 
     const payloadBytes = payload.toUint8Array()
     if (payloadBytes.length > 0xffff) {
@@ -57,7 +62,7 @@ export class RequestUpdate {
     return buf.freeze()
   }
 
-  static parsePayload(buf: BaseByteBuffer): RequestUpdate {
+  static parsePayload(buf: BaseByteBuffer, version: MoqtVersion = MoqtVersion.DEFAULT): RequestUpdate {
     const requestId = buf.getVI()
 
     const paramCountBig = buf.getVI()
@@ -67,7 +72,7 @@ export class RequestUpdate {
     }
 
     const parameters: MessageParameter[] = []
-    for (const kvp of deserializeMessageParameterKvps(buf, paramCount)) {
+    for (const kvp of deserializeMessageParameterKvps(buf, paramCount, version)) {
       const param = MessageParameter.fromKeyValuePair(kvp)
       if (param !== undefined) parameters.push(param)
     }

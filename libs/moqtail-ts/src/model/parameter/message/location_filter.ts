@@ -17,7 +17,7 @@
 import { BaseByteBuffer, ByteBuffer } from '../../common/byte_buffer'
 import { KeyValuePair } from '../../common/pair'
 import { Location } from '../../common/location'
-import { ProtocolViolationError } from '../../error/error'
+import { KeyValueFormattingError, ProtocolViolationError } from '../../error/error'
 import { MessageParameterType } from '../constant'
 import { Parameter } from '../parameter'
 import { LocationFilterType } from '../../control/constant'
@@ -185,6 +185,86 @@ export class LocationFilter implements Parameter {
     }
     const endObject = count > 3 ? buf.getVI() : undefined
     return new LocationFilter(filterType, startGroup, startObject, endGroup, endObject)
+  }
+
+  /**
+   * The draft-20 Value: up to four varints, StartGroup, StartObject, EndGroupDelta and
+   * EndObject, of which a prefix is present. The caller writes the Length in front, and
+   * the Length is what says how many follow.
+   *
+   * Two fields that are both 0 mean the Next Object, so an open-ended absolute start at
+   * `{0, 0}` has no two-field form. Draft-20 says that filter is equivalent to none, and
+   * it is written as none.
+   */
+  serializeDraft20Value(): Uint8Array {
+    const buf = new ByteBuffer()
+    const fields: bigint[] = []
+    switch (this.filterType) {
+      case LocationFilterType.None:
+        break
+      case LocationFilterType.NextObject:
+        fields.push(0n, 0n)
+        break
+      case LocationFilterType.AbsoluteStart:
+        if (this.startGroup !== 0n || this.startObject !== 0n) fields.push(this.startGroup!, this.startObject!)
+        break
+      default: {
+        const count = FIELD_COUNT[this.filterType]
+        if (count > 0) fields.push(this.startGroup!)
+        if (count > 1) fields.push(this.startObject!)
+        if (count > 2) fields.push(this.endGroup! - this.startGroup!)
+        if (count > 3) fields.push(this.endObject!)
+      }
+    }
+    for (const field of fields) buf.putVI(field)
+    return buf.toUint8Array()
+  }
+
+  /**
+   * Reads a draft-20 Value, the bytes its Length delimits. How many varints it holds
+   * selects the form: none is no filter, one a relative start, two an absolute start (or
+   * the Next Object when both are 0), three adds an End Group and four an End Object.
+   *
+   * @throws :{@link KeyValueFormattingError} When the Value is not a whole number of at
+   * most four varints.
+   * @throws :{@link ProtocolViolationError} For an End Group past 2^64-1.
+   */
+  static deserializeDraft20Value(value: Uint8Array): LocationFilter {
+    const buf = new ByteBuffer()
+    buf.putBytes(value)
+    const frozen = buf.freeze()
+    const fields: bigint[] = []
+    while (frozen.remaining > 0) {
+      if (fields.length === 4)
+        throw new KeyValueFormattingError('LocationFilter.deserializeDraft20Value(more than four fields)')
+      try {
+        fields.push(frozen.getVI())
+      } catch {
+        throw new KeyValueFormattingError('LocationFilter.deserializeDraft20Value(truncated field)')
+      }
+    }
+    const [startGroup, startObject, delta, endObject] = fields
+    const endGroup = delta === undefined ? undefined : startGroup! + delta
+    if (endGroup !== undefined && endGroup > MAX_U64) {
+      throw new ProtocolViolationError(
+        'LocationFilter.deserializeDraft20Value',
+        `StartGroup plus EndGroupDelta exceeds 2^64 - 1`,
+      )
+    }
+    switch (fields.length) {
+      case 0:
+        return new LocationFilter(LocationFilterType.None)
+      case 1:
+        return new LocationFilter(LocationFilterType.RelativeStart, startGroup)
+      case 2:
+        return startGroup === 0n && startObject === 0n
+          ? new LocationFilter(LocationFilterType.NextObject)
+          : new LocationFilter(LocationFilterType.AbsoluteStart, startGroup, startObject)
+      case 3:
+        return new LocationFilter(LocationFilterType.AbsoluteStartGroupEnd, startGroup, startObject, endGroup)
+      default:
+        return new LocationFilter(LocationFilterType.AbsoluteRange, startGroup, startObject, endGroup, endObject)
+    }
   }
 
   toKeyValuePair(): KeyValuePair {
@@ -360,6 +440,47 @@ if (import.meta.vitest) {
     test('fromKeyValuePair returns undefined for wrong type', () => {
       const pair = KeyValuePair.tryNewVarInt(MessageParameterType.ObjectDeliveryTimeout, 100n)
       expect(LocationFilter.fromKeyValuePair(pair)).toBeUndefined()
+    })
+  })
+
+  describe('LocationFilter (draft-20)', () => {
+    const vi = (fields: bigint[]) => {
+      const buf = new ByteBuffer()
+      for (const f of fields) buf.putVI(f)
+      return buf.toUint8Array()
+    }
+
+    test('the field count selects the form, both ways', () => {
+      const cases: [bigint[], LocationFilter][] = [
+        [[], new LocationFilter(LocationFilterType.None)],
+        [[3n], new LocationFilter(LocationFilterType.RelativeStart, 3n)],
+        [[0n, 0n], new LocationFilter(LocationFilterType.NextObject)],
+        [[10n, 2n], new LocationFilter(LocationFilterType.AbsoluteStart, 10n, 2n)],
+        [[10n, 2n, 5n], new LocationFilter(LocationFilterType.AbsoluteStartGroupEnd, 10n, 2n, 15n)],
+        // With an end bound, two zeroed fields are the absolute origin, not the Next Object.
+        [[0n, 0n, 0n, 4n], new LocationFilter(LocationFilterType.AbsoluteRange, 0n, 0n, 0n, 4n)],
+        [[10n, 2n, 5n, 7n], new LocationFilter(LocationFilterType.AbsoluteRange, 10n, 2n, 15n, 7n)],
+      ]
+      for (const [fields, filter] of cases) {
+        expect(LocationFilter.deserializeDraft20Value(vi(fields))).toEqual(filter)
+        expect(Array.from(filter.serializeDraft20Value())).toEqual(Array.from(vi(fields)))
+      }
+    })
+
+    test('an open-ended origin is written as no filter', () => {
+      expect(new LocationFilter(LocationFilterType.AbsoluteStart, 0n, 0n).serializeDraft20Value()).toEqual(
+        new Uint8Array(),
+      )
+    })
+
+    test('a Value that is not a prefix of four varints is a KEY_VALUE_FORMATTING_ERROR', () => {
+      for (const value of [vi([1n, 2n, 3n, 4n, 5n]), new Uint8Array([0x01, 0x80])]) {
+        expect(() => LocationFilter.deserializeDraft20Value(value)).toThrow(KeyValueFormattingError)
+      }
+    })
+
+    test('an End Group past 2^64-1 is a PROTOCOL_VIOLATION', () => {
+      expect(() => LocationFilter.deserializeDraft20Value(vi([MAX_U64, 0n, 1n]))).toThrow(ProtocolViolationError)
     })
   })
 }
