@@ -575,7 +575,6 @@ mod enum_conformance {
       TerminationCode::DataStreamTimeout,
       TerminationCode::AuthTokenCacheOverflow,
       TerminationCode::DuplicateAuthTokenAlias,
-      TerminationCode::VersionNegotiationFailed,
       TerminationCode::MalformedAuthToken,
       TerminationCode::UnknownAuthTokenAlias,
       TerminationCode::ExpiredAuthToken,
