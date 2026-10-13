@@ -273,12 +273,14 @@ impl MessageParameter {
           | ControlMessageType::Fetch
           | ControlMessageType::Publish
       ),
+      // In PUBLISH_STATE_NOTIFY it reports the filter now in effect (§9.10).
       Self::LocationFilter { .. } => matches!(
         msg_type,
         ControlMessageType::Subscribe
           | ControlMessageType::Fetch
           | ControlMessageType::Publish
           | ControlMessageType::RequestUpdate
+          | ControlMessageType::PublishStateNotify
       ),
       Self::SwitchFrom { .. } | Self::FillParameters { .. } => matches!(
         msg_type,
@@ -290,13 +292,18 @@ impl MessageParameter {
           | ControlMessageType::Publish
           | ControlMessageType::RequestOk
       ),
+      // §9.20.17. The publisher MUST include it in PUBLISH_STATE_NOTIFY when known,
+      // so the subscriber can tell where in the Track the change took effect.
       Self::LargestObject { .. } => matches!(
         msg_type,
         ControlMessageType::SubscribeOk
           | ControlMessageType::Publish
           | ControlMessageType::FetchOk
           | ControlMessageType::RequestOk
+          | ControlMessageType::PublishStateNotify
       ),
+      // §9.20.18; in PUBLISH_STATE_NOTIFY it reports the Forwarding State now in
+      // effect at the publisher.
       Self::Forward { .. } => matches!(
         msg_type,
         ControlMessageType::Subscribe
@@ -304,6 +311,7 @@ impl MessageParameter {
           | ControlMessageType::Publish
           | ControlMessageType::SubscribeNamespace
           | ControlMessageType::SubscribeTracks
+          | ControlMessageType::PublishStateNotify
       ),
       Self::NewGroupRequest { .. } => matches!(
         msg_type,

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+export * from './publish_state_notify'
 export * from './publish_namespace'
 export * from './publish_skipped'
 export * from './subscribe'
