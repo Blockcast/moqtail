@@ -16,7 +16,7 @@ use crate::model::common::location::Location;
 use crate::model::common::varint::{BufMutVarIntExt, BufVarIntExt};
 use crate::model::control::constant::LocationFilterType;
 use crate::model::error::ParseError;
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 
 /// The range of Locations a subscription or fetch selects.
 ///
@@ -169,6 +169,85 @@ impl LocationFilter {
         Self::AbsoluteRange { start, end }
       }
       LocationFilterType::NextObject => Self::NextObject,
+    })
+  }
+}
+
+impl LocationFilter {
+  /// Encodes the draft-20 Value: up to four varints, StartGroup, StartObject,
+  /// EndGroupDelta and EndObject, of which a prefix is present. The caller writes
+  /// the Length in front, and the Length is what says how many follow.
+  ///
+  /// Two fields that are both 0 mean the Next Object, so an open-ended absolute
+  /// start at `{0, 0}` has no two-field form. Draft-20 says that filter is
+  /// equivalent to none, and it is written as none.
+  pub fn serialize_draft20(&self) -> Result<Bytes, ParseError> {
+    let fields: Vec<u64> = match self {
+      Self::None => vec![],
+      Self::AbsoluteStart { start } if start.group == 0 && start.object == 0 => vec![],
+      Self::RelativeStart { start_group } => vec![*start_group],
+      Self::NextObject => vec![0, 0],
+      Self::AbsoluteStart { start } => vec![start.group, start.object],
+      Self::AbsoluteStartGroupEnd { start, end_group } => vec![
+        start.group,
+        start.object,
+        end_group_delta(start.group, *end_group)?,
+      ],
+      Self::AbsoluteRange { start, end } => vec![
+        start.group,
+        start.object,
+        end_group_delta(start.group, end.group)?,
+        end.object,
+      ],
+    };
+    let mut buf = BytesMut::new();
+    for field in fields {
+      buf.put_vi(field)?;
+    }
+    Ok(buf.freeze())
+  }
+
+  /// Decodes a draft-20 Value, the bytes its Length delimits. How many varints
+  /// it holds selects the form: none is no filter, one a relative start, two an
+  /// absolute start (or the Next Object when both are 0), three adds an End
+  /// Group and four an End Object.
+  ///
+  /// A Value that is not a whole number of at most four varints does not match the
+  /// serialization the Type defines, which is a KEY_VALUE_FORMATTING_ERROR. An End
+  /// Group past 2^64 - 1 is a PROTOCOL_VIOLATION, as in draft-22.
+  pub fn deserialize_draft20(value: &Bytes) -> Result<Self, ParseError> {
+    let mut bytes = value.clone();
+    let mut fields = Vec::with_capacity(4);
+    while bytes.has_remaining() {
+      if fields.len() == 4 {
+        return Err(ParseError::KeyValueFormattingError {
+          context: "LocationFilter::deserialize_draft20(more than four fields)",
+        });
+      }
+      fields.push(
+        bytes
+          .get_vi()
+          .map_err(|_| ParseError::KeyValueFormattingError {
+            context: "LocationFilter::deserialize_draft20(truncated field)",
+          })?,
+      );
+    }
+    Ok(match fields[..] {
+      [] => Self::None,
+      [start_group] => Self::RelativeStart { start_group },
+      [0, 0] => Self::NextObject,
+      [group, object] => Self::AbsoluteStart {
+        start: Location::new(group, object),
+      },
+      [group, object, delta] => Self::AbsoluteStartGroupEnd {
+        start: Location::new(group, object),
+        end_group: end_group(group, delta)?,
+      },
+      [group, object, delta, end_object] => Self::AbsoluteRange {
+        start: Location::new(group, object),
+        end: Location::new(end_group(group, delta)?, end_object),
+      },
+      _ => unreachable!("at most four fields are read"),
     })
   }
 }
@@ -437,5 +516,83 @@ mod tests {
       None
     );
     assert_eq!(LocationFilter::None.fetch_range(None), None);
+  }
+
+  fn draft20(fields: &[u64]) -> Bytes {
+    let mut buf = BytesMut::new();
+    for f in fields {
+      buf.put_vi(*f).unwrap();
+    }
+    buf.freeze()
+  }
+
+  #[test]
+  fn draft20_field_count_selects_the_form() {
+    let cases = [
+      (vec![], LocationFilter::None),
+      (vec![3], LocationFilter::RelativeStart { start_group: 3 }),
+      (vec![0, 0], LocationFilter::NextObject),
+      (
+        vec![10, 2],
+        LocationFilter::AbsoluteStart { start: loc(10, 2) },
+      ),
+      (
+        vec![10, 2, 5],
+        LocationFilter::AbsoluteStartGroupEnd {
+          start: loc(10, 2),
+          end_group: 15,
+        },
+      ),
+      // With an end bound, two zeroed fields are the absolute origin, not the
+      // Next Object.
+      (
+        vec![0, 0, 0, 4],
+        LocationFilter::AbsoluteRange {
+          start: loc(0, 0),
+          end: loc(0, 4),
+        },
+      ),
+      (
+        vec![10, 2, 5, 7],
+        LocationFilter::AbsoluteRange {
+          start: loc(10, 2),
+          end: loc(15, 7),
+        },
+      ),
+    ];
+    for (fields, filter) in cases {
+      let wire = draft20(&fields);
+      assert_eq!(LocationFilter::deserialize_draft20(&wire).unwrap(), filter);
+      assert_eq!(filter.serialize_draft20().unwrap(), wire, "{filter:?}");
+    }
+  }
+
+  #[test]
+  fn draft20_writes_an_open_ended_origin_as_no_filter() {
+    let origin = LocationFilter::AbsoluteStart { start: loc(0, 0) };
+    assert!(origin.serialize_draft20().unwrap().is_empty());
+  }
+
+  #[test]
+  fn draft20_rejects_a_value_that_is_not_a_prefix_of_four_varints() {
+    for wire in [
+      draft20(&[1, 2, 3, 4, 5]),
+      // A two-byte varint prefix with only one byte behind it.
+      Bytes::from_static(&[0x01, 0x80]),
+    ] {
+      assert!(matches!(
+        LocationFilter::deserialize_draft20(&wire),
+        Err(ParseError::KeyValueFormattingError { .. })
+      ));
+    }
+  }
+
+  #[test]
+  fn draft20_rejects_an_end_group_past_the_maximum() {
+    let wire = draft20(&[u64::MAX, 0, 1]);
+    assert!(matches!(
+      LocationFilter::deserialize_draft20(&wire),
+      Err(ParseError::ProtocolViolation { .. })
+    ));
   }
 }

@@ -16,7 +16,7 @@ use crate::model::common::location::Location;
 use crate::model::common::pair::KeyValuePair;
 use crate::model::common::tuple::Tuple;
 use crate::model::common::varint::{BufMutVarIntExt, BufVarIntExt};
-use crate::model::control::constant::{ControlMessageType, GroupOrder, SwitchMode};
+use crate::model::control::constant::{ControlMessageType, GroupOrder, SwitchMode, Version};
 use crate::model::error::ParseError;
 use crate::model::parameter::authorization_token::AuthorizationToken;
 use crate::model::parameter::constant::MessageParameterType;
@@ -487,7 +487,7 @@ impl MessageParameter {
                   ),
                 });
               }
-              let kvp = read_message_parameter_value(&mut payload, type_value)?;
+              let kvp = read_message_parameter_value(&mut payload, type_value, Version::default())?;
               parameters.push(MessageParameter::deserialize(&kvp)?);
             }
             Ok(Self::FillParameters { parameters })
@@ -784,6 +784,16 @@ pub fn deserialize_message_parameters(
   count: u64,
   msg_type: ControlMessageType,
 ) -> Result<Vec<MessageParameter>, ParseError> {
+  deserialize_message_parameters_for(bytes, count, msg_type, Version::default())
+}
+
+/// [`deserialize_message_parameters`] for the wire of a negotiated `version`.
+pub fn deserialize_message_parameters_for(
+  bytes: &mut Bytes,
+  count: u64,
+  msg_type: ControlMessageType,
+  version: Version,
+) -> Result<Vec<MessageParameter>, ParseError> {
   let mut params = Vec::with_capacity(count as usize);
   let mut prev_type = 0u64;
   for _ in 0..count {
@@ -799,7 +809,7 @@ pub fn deserialize_message_parameters(
         })?;
     prev_type = type_value;
 
-    let kvp = read_message_parameter_value(bytes, type_value)?;
+    let kvp = read_message_parameter_value(bytes, type_value, version)?;
 
     let param = MessageParameter::deserialize(&kvp)?;
     if !param.is_valid_for(msg_type) {
@@ -850,10 +860,27 @@ const fn is_object_range_filter(type_value: u64) -> bool {
 }
 
 /// Reads one parameter Value whose Type has already been decoded.
+///
+/// The value is returned in its draft-22 form whatever `version` it was read in,
+/// so [`MessageParameter::deserialize`] has one form to decode.
 fn read_message_parameter_value(
   bytes: &mut Bytes,
   type_value: u64,
+  version: Version,
 ) -> Result<KeyValuePair, ParseError> {
+  if version == Version::Draft20 && is_draft20_specific(type_value) {
+    let KeyValuePair::Bytes { value, .. } =
+      KeyValuePair::deserialize_bytes_value(bytes, type_value)?
+    else {
+      unreachable!("deserialize_bytes_value returns Bytes")
+    };
+    let value = if type_value == MessageParameterType::LocationFilter as u64 {
+      LocationFilter::deserialize_draft20(&value)?.serialize()?
+    } else {
+      transcode_parameter_list(value, Version::Draft20, Version::Draft22)?
+    };
+    return KeyValuePair::new_bytes(type_value, value);
+  }
   match value_shape(type_value) {
     ValueShape::Uint8 => {
       if !bytes.has_remaining() {
@@ -916,6 +943,14 @@ const fn value_shape(type_value: u64) -> ValueShape {
 /// ascending Type first, since the Type Delta is an unsigned varint and cannot
 /// represent a decrease.
 pub fn serialize_message_parameters(params: &[MessageParameter]) -> Result<Bytes, ParseError> {
+  serialize_message_parameters_for(params, Version::default())
+}
+
+/// [`serialize_message_parameters`] for the wire of a negotiated `version`.
+pub fn serialize_message_parameters_for(
+  params: &[MessageParameter],
+  version: Version,
+) -> Result<Bytes, ParseError> {
   let mut kvps: Vec<KeyValuePair> = params
     .iter()
     .map(|p| p.clone().try_into())
@@ -934,31 +969,95 @@ pub fn serialize_message_parameters(params: &[MessageParameter]) -> Result<Bytes
           details: format!("type {type_value} is less than previous type {prev_type}"),
         })?;
     buf.put_vi(delta_type)?;
-    match (value_shape(type_value), kvp) {
-      (ValueShape::Uint8, KeyValuePair::VarInt { value, .. }) => {
-        let byte: u8 = (*value)
-          .try_into()
-          .map_err(|_| ParseError::ProtocolViolation {
-            context: "serialize_message_parameters",
-            details: format!("uint8 parameter 0x{type_value:02X} value {value} exceeds 255"),
-          })?;
-        buf.put_u8(byte);
-      }
-      (
-        ValueShape::BareLocation | ValueShape::LocationFilter,
-        KeyValuePair::Bytes { value, .. },
-      ) => {
-        buf.extend_from_slice(value);
-      }
-      (_, KeyValuePair::VarInt { value, .. }) => buf.put_vi(*value)?,
-      (_, KeyValuePair::Bytes { value, .. }) => {
-        buf.put_vi(value.len() as u64)?;
-        buf.extend_from_slice(value);
-      }
-    }
+    write_message_parameter_value(&mut buf, kvp, version)?;
     prev_type = type_value;
   }
   Ok(buf.freeze())
+}
+
+/// Writes one parameter Value, which is held in its draft-22 form, for the wire of
+/// `version`. The Type has already been written.
+fn write_message_parameter_value(
+  buf: &mut BytesMut,
+  kvp: &KeyValuePair,
+  version: Version,
+) -> Result<(), ParseError> {
+  let type_value = kvp.get_type();
+  if version == Version::Draft20 && is_draft20_specific(type_value) {
+    let KeyValuePair::Bytes { value, .. } = kvp else {
+      return Err(ParseError::ProtocolViolation {
+        context: "write_message_parameter_value",
+        details: format!("parameter 0x{type_value:02X} must be bytes-valued"),
+      });
+    };
+    let value = if type_value == MessageParameterType::LocationFilter as u64 {
+      LocationFilter::deserialize(&mut value.clone())?.serialize_draft20()?
+    } else {
+      transcode_parameter_list(value.clone(), Version::Draft22, Version::Draft20)?
+    };
+    buf.put_vi(value.len() as u64)?;
+    buf.extend_from_slice(&value);
+    return Ok(());
+  }
+  match (value_shape(type_value), kvp) {
+    (ValueShape::Uint8, KeyValuePair::VarInt { value, .. }) => {
+      let byte: u8 = (*value)
+        .try_into()
+        .map_err(|_| ParseError::ProtocolViolation {
+          context: "write_message_parameter_value",
+          details: format!("uint8 parameter 0x{type_value:02X} value {value} exceeds 255"),
+        })?;
+      buf.put_u8(byte);
+    }
+    (ValueShape::BareLocation | ValueShape::LocationFilter, KeyValuePair::Bytes { value, .. }) => {
+      buf.extend_from_slice(value);
+    }
+    (_, KeyValuePair::VarInt { value, .. }) => buf.put_vi(*value)?,
+    (_, KeyValuePair::Bytes { value, .. }) => {
+      buf.put_vi(value.len() as u64)?;
+      buf.extend_from_slice(value);
+    }
+  }
+  Ok(())
+}
+
+/// The parameters whose wire form differs between draft-20 and draft-22.
+/// LOCATION_FILTER itself, and FILL_PARAMETERS, which can carry one.
+///
+/// Draft-20 defines LOCATION_FILTER as length-prefixed (draft-20 §10.2.9) and
+/// infers its form from the number of fields. Draft-22 writes a Location Filter
+/// Type and no length (§9.20.9).
+const fn is_draft20_specific(type_value: u64) -> bool {
+  type_value == MessageParameterType::LocationFilter as u64
+    || type_value == MessageParameterType::FillParameters as u64
+}
+
+/// Re-encodes a delta-coded parameter list, as FILL_PARAMETERS carries one, from
+/// the wire of one version to another's.
+fn transcode_parameter_list(
+  mut bytes: Bytes,
+  from: Version,
+  to: Version,
+) -> Result<Bytes, ParseError> {
+  let mut out = BytesMut::new();
+  let mut prev_type = 0u64;
+  while bytes.has_remaining() {
+    let delta_type = bytes.get_vi()?;
+    let type_value =
+      prev_type
+        .checked_add(delta_type)
+        .ok_or_else(|| ParseError::ProtocolViolation {
+          context: "transcode_parameter_list",
+          details: format!(
+            "previous type {prev_type} plus delta type {delta_type} exceeds 2^64 - 1"
+          ),
+        })?;
+    let kvp = read_message_parameter_value(&mut bytes, type_value, from)?;
+    out.put_vi(delta_type)?;
+    write_message_parameter_value(&mut out, &kvp, to)?;
+    prev_type = type_value;
+  }
+  Ok(out.freeze())
 }
 
 /// Applies a set of parameter updates to an existing parameter list.
@@ -1017,7 +1116,7 @@ mod tests {
   fn roundtrip(param: MessageParameter) -> MessageParameter {
     let mut bytes = param.serialize().unwrap();
     let type_value = bytes.get_vi().unwrap();
-    let kvp = read_message_parameter_value(&mut bytes, type_value).unwrap();
+    let kvp = read_message_parameter_value(&mut bytes, type_value, Version::default()).unwrap();
     let result = MessageParameter::deserialize(&kvp).unwrap();
     assert_eq!(bytes.remaining(), 0);
     result
@@ -1983,5 +2082,85 @@ mod tests {
         &[Range::new(0, 3)]
       )]
     );
+  }
+
+  fn vi(value: u64) -> Vec<u8> {
+    let mut buf = BytesMut::new();
+    buf.put_vi(value).unwrap();
+    buf.to_vec()
+  }
+
+  /// A LOCATION_FILTER at top level and one inside FILL_PARAMETERS. The two
+  /// encodings coincide byte for byte when every field is a one-byte varint and
+  /// the filter is not the Next Object, so this uses a two-byte StartGroup and a
+  /// Next Object filter: neither version reads the other's bytes as the same list.
+  fn versioned_list() -> (Vec<MessageParameter>, Vec<u8>, Vec<u8>) {
+    let params = vec![
+      MessageParameter::new_location_filter(LocationFilter::AbsoluteStart {
+        start: Location::new(1000, 2),
+      }),
+      MessageParameter::new_fill_parameters(vec![MessageParameter::new_location_filter(
+        LocationFilter::NextObject,
+      )]),
+    ];
+    let group = vi(1000);
+    // Draft-20: LOCATION_FILTER is length-prefixed and its Length implies the form.
+    let mut draft20 = vec![0x21, (group.len() + 1) as u8];
+    draft20.extend(&group);
+    draft20.extend([0x02, 0x02, 0x04, 0x21, 0x02, 0x00, 0x00]);
+    // Draft-22: a Location Filter Type (0x02 Absolute Start, 0x05 Next Object), no length.
+    let mut draft22 = vec![0x21, 0x02];
+    draft22.extend(&group);
+    draft22.extend([0x02, 0x02, 0x02, 0x21, 0x05]);
+    (params, draft20, draft22)
+  }
+
+  #[test]
+  fn each_version_writes_and_reads_its_own_location_filter() {
+    let (params, draft20, draft22) = versioned_list();
+    for (version, wire) in [(Version::Draft20, &draft20), (Version::Draft22, &draft22)] {
+      let written = serialize_message_parameters_for(&params, version).unwrap();
+      assert_eq!(written.to_vec(), *wire, "{version:?} writes");
+      let mut bytes = Bytes::from(wire.clone());
+      let read =
+        deserialize_message_parameters_for(&mut bytes, 2, ControlMessageType::Subscribe, version)
+          .unwrap();
+      assert_eq!(read, params, "{version:?} reads");
+      assert!(!bytes.has_remaining());
+    }
+    assert_eq!(
+      serialize_message_parameters(&params).unwrap().to_vec(),
+      draft22,
+      "the default is draft-22"
+    );
+  }
+
+  #[test]
+  fn neither_version_reads_the_others_location_filter() {
+    let (params, draft20, draft22) = versioned_list();
+    for (version, wire) in [(Version::Draft22, draft20), (Version::Draft20, draft22)] {
+      let mut bytes = Bytes::from(wire);
+      let read =
+        deserialize_message_parameters_for(&mut bytes, 2, ControlMessageType::Subscribe, version);
+      assert!(
+        read.as_ref().map_or(true, |read| *read != params),
+        "{version:?} must not read the other version's bytes as the same list: {read:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn a_draft20_location_filter_with_a_malformed_value_closes_the_session() {
+    // Five fields: not a prefix of the four the Type defines.
+    let mut bytes = Bytes::from_static(&[0x21, 0x05, 1, 2, 3, 4, 5]);
+    assert!(matches!(
+      deserialize_message_parameters_for(
+        &mut bytes,
+        1,
+        ControlMessageType::Subscribe,
+        Version::Draft20
+      ),
+      Err(ParseError::KeyValueFormattingError { .. })
+    ));
   }
 }

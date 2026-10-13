@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::constant::ControlMessageType;
+use super::constant::{ControlMessageType, Version};
 use super::control_message::ControlMessageTrait;
 use crate::model::common::varint::{BufMutVarIntExt, BufVarIntExt};
 use crate::model::error::ParseError;
 use crate::model::parameter::message_parameter::{
-  MessageParameter, deserialize_message_parameters, serialize_message_parameters,
+  MessageParameter, deserialize_message_parameters_for, serialize_message_parameters_for,
 };
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -38,13 +38,20 @@ impl RequestUpdate {
 
 impl ControlMessageTrait for RequestUpdate {
   fn serialize(&self) -> Result<Bytes, ParseError> {
+    self.serialize_for(Version::default())
+  }
+
+  fn serialize_for(&self, version: Version) -> Result<Bytes, ParseError> {
     let mut buf = BytesMut::new();
     buf.put_vi(ControlMessageType::RequestUpdate)?;
 
     let mut payload = BytesMut::new();
     payload.put_vi(self.request_id)?;
     payload.put_vi(self.parameters.len())?;
-    payload.extend_from_slice(&serialize_message_parameters(&self.parameters)?);
+    payload.extend_from_slice(&serialize_message_parameters_for(
+      &self.parameters,
+      version,
+    )?);
 
     let payload_len: u16 = payload
       .len()
@@ -63,11 +70,19 @@ impl ControlMessageTrait for RequestUpdate {
   }
 
   fn parse_payload(payload: &mut Bytes) -> Result<Box<Self>, ParseError> {
+    Self::parse_payload_for(payload, Version::default())
+  }
+
+  fn parse_payload_for(payload: &mut Bytes, version: Version) -> Result<Box<Self>, ParseError> {
     let request_id = payload.get_vi()?;
 
     let param_count = payload.get_vi()?;
-    let parameters =
-      deserialize_message_parameters(payload, param_count, ControlMessageType::RequestUpdate)?;
+    let parameters = deserialize_message_parameters_for(
+      payload,
+      param_count,
+      ControlMessageType::RequestUpdate,
+      version,
+    )?;
 
     Ok(Box::new(RequestUpdate {
       request_id,

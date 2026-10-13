@@ -612,7 +612,9 @@ pub(crate) async fn forward_publish_downstream(
       return;
     }
   };
-  let mut stream = ControlStreamHandler::new(send, recv).with_peer_id(subscriber.connection_id);
+  let mut stream = ControlStreamHandler::new(send, recv)
+    .with_peer_id(subscriber.connection_id)
+    .with_version(subscriber.version);
   let publish_request_id = publish.request_id;
 
   // Registered before the PUBLISH goes out, so nothing sent in response to it can

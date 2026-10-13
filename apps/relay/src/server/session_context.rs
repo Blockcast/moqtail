@@ -22,6 +22,7 @@ use std::{
 use tokio::sync::{RwLock, mpsc};
 
 use moqtail::model::common::location::Location;
+use moqtail::model::control::constant::Version;
 use moqtail::model::data::fetch_object::FetchObjectPayload;
 
 use moqtail::transport::connection::{TransportConnection, TransportKind};
@@ -97,6 +98,8 @@ pub struct SessionContext {
   pub(crate) relay_pending_requests: Arc<RwLock<BTreeMap<u64, PendingRequest>>>,
   pub(crate) connection_id: usize,
   pub(crate) transport_kind: TransportKind,
+  /// The MOQT version this session negotiated by ALPN.
+  pub(crate) version: Version,
   pub(crate) client: Arc<RwLock<Option<Arc<MOQTClient>>>>, // the client that is connected to this session
   pub(crate) connection: TransportConnection,
   pub(crate) server_config: &'static AppConfig,
@@ -116,6 +119,7 @@ impl SessionContext {
     track_manager: TrackManager,
     request_maps: RequestMaps,
     connection: TransportConnection,
+    version: Version,
     relay_next_request_id: Arc<AtomicU64>,
     active_request_streams: Arc<AtomicU64>,
     draining: Arc<AtomicBool>,
@@ -126,6 +130,7 @@ impl SessionContext {
       relay_pending_requests: request_maps.relay_pending_requests,
       connection_id: connection.stable_id(),
       transport_kind: connection.kind(),
+      version,
       client: Arc::new(RwLock::new(None)), // initially no client is set
       connection,
       server_config,

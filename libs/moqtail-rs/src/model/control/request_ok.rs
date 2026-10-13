@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::constant::ControlMessageType;
+use super::constant::{ControlMessageType, Version};
 use super::control_message::ControlMessageTrait;
 use crate::model::common::varint::{BufMutVarIntExt, BufVarIntExt};
 use crate::model::error::ParseError;
 use crate::model::parameter::message_parameter::{
-  MessageParameter, deserialize_message_parameters, serialize_message_parameters,
+  MessageParameter, deserialize_message_parameters_for, serialize_message_parameters_for,
 };
 use crate::model::property::track_property::{
   TrackProperty, deserialize_track_properties, serialize_track_properties,
@@ -72,12 +72,19 @@ impl RequestOk {
 
 impl ControlMessageTrait for RequestOk {
   fn serialize(&self) -> Result<Bytes, ParseError> {
+    self.serialize_for(Version::default())
+  }
+
+  fn serialize_for(&self, version: Version) -> Result<Bytes, ParseError> {
     let mut buf = BytesMut::new();
     buf.put_vi(ControlMessageType::RequestOk)?;
 
     let mut payload = BytesMut::new();
     payload.put_vi(self.parameters.len() as u64)?;
-    payload.extend_from_slice(&serialize_message_parameters(&self.parameters)?);
+    payload.extend_from_slice(&serialize_message_parameters_for(
+      &self.parameters,
+      version,
+    )?);
 
     // Track Properties span the remaining message length (no explicit count).
     payload.extend_from_slice(&serialize_track_properties(&self.track_properties)?);
@@ -99,9 +106,17 @@ impl ControlMessageTrait for RequestOk {
   }
 
   fn parse_payload(payload: &mut Bytes) -> Result<Box<Self>, ParseError> {
+    Self::parse_payload_for(payload, Version::default())
+  }
+
+  fn parse_payload_for(payload: &mut Bytes, version: Version) -> Result<Box<Self>, ParseError> {
     let param_count = payload.get_vi()?;
-    let parameters =
-      deserialize_message_parameters(payload, param_count, ControlMessageType::RequestOk)?;
+    let parameters = deserialize_message_parameters_for(
+      payload,
+      param_count,
+      ControlMessageType::RequestOk,
+      version,
+    )?;
 
     // Whatever remains is the Track Properties sequence.
     let track_properties = deserialize_track_properties(payload)?;

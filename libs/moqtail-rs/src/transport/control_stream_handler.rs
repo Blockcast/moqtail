@@ -16,6 +16,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use tokio::time::{Duration, Instant, sleep_until};
 use tracing::{debug, error, info, warn};
 
+use crate::model::control::constant::Version;
 use crate::model::control::control_message::{ControlMessage, ControlMessageTrait};
 use crate::model::control::setup::Setup;
 use crate::model::error::{ParseError, TerminationCode};
@@ -46,6 +47,9 @@ pub struct ControlStreamHandler {
   /// Id of the peer connection on the other end of this stream, used to label
   /// control-message traces. `None` when the caller did not set one.
   peer_id: Option<usize>,
+  /// The MOQT version the session negotiated, which every message on this stream
+  /// is read and written in.
+  version: Version,
 }
 
 impl ControlStreamHandler {
@@ -57,7 +61,20 @@ impl ControlStreamHandler {
       recv_buf: Box::new([0; MTU_SIZE]),
       partial_message_deadline: None,
       peer_id: None,
+      version: Version::default(),
     }
+  }
+
+  /// Reads and writes this stream in the MOQT version the session negotiated by
+  /// ALPN. Without it the stream speaks the default version.
+  pub fn with_version(mut self, version: Version) -> Self {
+    self.version = version;
+    self
+  }
+
+  /// The version this stream reads and writes.
+  pub fn version(&self) -> Version {
+    self.version
   }
 
   /// Associates the peer connection id with this stream so control-message
@@ -78,7 +95,7 @@ impl ControlStreamHandler {
 
   pub async fn send(&mut self, message: &ControlMessage) -> Result<(), TerminationCode> {
     let bytes = message
-      .serialize()
+      .serialize_for(self.version)
       .map_err(|_| TerminationCode::InternalError)?;
     info!(
       "control message sending to {} — {:?} ({} bytes): {}",
@@ -131,7 +148,7 @@ impl ControlStreamHandler {
     message: &impl ControlMessageTrait,
   ) -> Result<(), TerminationCode> {
     let bytes = message
-      .serialize()
+      .serialize_for(self.version)
       .map_err(|_| TerminationCode::InternalError)?;
     info!(
       "control message sending to {} — {:?} ({} bytes): {}",
@@ -168,7 +185,7 @@ impl ControlStreamHandler {
         let mut bytes = self.recv_bytes.clone().freeze();
         let original_remaining = bytes.remaining();
 
-        match ControlMessage::deserialize(&mut bytes) {
+        match ControlMessage::deserialize_for(&mut bytes, self.version) {
           Ok(msg) => {
             let consumed = original_remaining - bytes.remaining();
             info!(
@@ -587,6 +604,48 @@ mod tests {
       Err(TerminationCode::ProtocolViolation) => Ok(()),
       other => panic!("Expected ProtocolViolation, got {other:?}"),
     }
+  }
+
+  /// A stream reads and writes in the version its session negotiated. A Next Object
+  /// filter is written differently by the two versions, so a stream on the other
+  /// version cannot read it.
+  #[tokio::test]
+  async fn a_stream_reads_and_writes_its_negotiated_version() -> Result<(), Box<dyn Error>> {
+    let subscribe = Subscribe::new_with_location_filter(
+      7,
+      Tuple::from_utf8_path("ns"),
+      TupleField::from_utf8("track"),
+      LocationFilter::NextObject,
+      vec![],
+    );
+    let message = ControlMessage::Subscribe(Box::new(subscribe));
+    let draft20 = message.serialize_for(Version::Draft20)?;
+    assert_ne!(draft20, message.serialize()?);
+
+    let setup = TestSetup::new().await?;
+    let (plane, mut server_send) = setup.create_control_plane().await?;
+    let mut plane = plane.with_version(Version::Draft20);
+    assert_eq!(plane.version(), Version::Draft20);
+    server_send.write_all(&draft20).await?;
+    assert_eq!(plane.next_message().await.unwrap(), message);
+
+    // Read as draft-22 the same bytes are a valid, different filter: Type 0x02 is an
+    // Absolute Start, and the draft-20 Next Object's two zeroes become {0, 0}.
+    // Nothing in the bytes says which was meant, which is why the version comes from
+    // ALPN and is never guessed.
+    let (mut default_plane, mut server_send) = setup.create_control_plane().await?;
+    assert_eq!(default_plane.version(), Version::Draft22);
+    server_send.write_all(&draft20).await?;
+    let ControlMessage::Subscribe(misread) = default_plane.next_message().await.unwrap() else {
+      panic!("expected a SUBSCRIBE");
+    };
+    assert_eq!(
+      misread.get_location_filter(),
+      Some(&LocationFilter::AbsoluteStart {
+        start: Location::new(0, 0)
+      })
+    );
+    Ok(())
   }
 
   #[tokio::test]

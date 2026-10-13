@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::constant::ControlMessageType;
+use super::constant::{ControlMessageType, Version};
 use super::control_message::ControlMessageTrait;
 use crate::model::common::tuple::{Tuple, TupleField};
 use crate::model::common::varint::{BufMutVarIntExt, BufVarIntExt};
 use crate::model::error::ParseError;
 use crate::model::parameter::message_parameter::{
-  MessageParameter, deserialize_message_parameters, serialize_message_parameters,
+  MessageParameter, deserialize_message_parameters_for, serialize_message_parameters_for,
 };
 use crate::model::property::track_property::{
   TrackProperty, deserialize_track_properties, serialize_track_properties,
@@ -57,6 +57,10 @@ impl Publish {
 
 impl ControlMessageTrait for Publish {
   fn serialize(&self) -> Result<Bytes, ParseError> {
+    self.serialize_for(Version::default())
+  }
+
+  fn serialize_for(&self, version: Version) -> Result<Bytes, ParseError> {
     let mut buf = BytesMut::new();
     buf.put_vi(ControlMessageType::Publish)?;
 
@@ -72,7 +76,10 @@ impl ControlMessageTrait for Publish {
 
     // Parameters
     payload.put_vi(self.parameters.len() as u64)?;
-    payload.extend_from_slice(&serialize_message_parameters(&self.parameters)?);
+    payload.extend_from_slice(&serialize_message_parameters_for(
+      &self.parameters,
+      version,
+    )?);
 
     // Track Properties (no length prefix; bounded by outer message Length field)
     payload.extend_from_slice(&serialize_track_properties(&self.track_properties)?);
@@ -94,6 +101,10 @@ impl ControlMessageTrait for Publish {
   }
 
   fn parse_payload(payload: &mut Bytes) -> Result<Box<Self>, ParseError> {
+    Self::parse_payload_for(payload, Version::default())
+  }
+
+  fn parse_payload_for(payload: &mut Bytes, version: Version) -> Result<Box<Self>, ParseError> {
     let request_id = payload.get_vi()?;
     let track_namespace = Tuple::deserialize(payload)?;
 
@@ -110,8 +121,12 @@ impl ControlMessageTrait for Publish {
     let track_alias = payload.get_vi()?;
 
     let param_count = payload.get_vi()?;
-    let parameters =
-      deserialize_message_parameters(payload, param_count, ControlMessageType::Publish)?;
+    let parameters = deserialize_message_parameters_for(
+      payload,
+      param_count,
+      ControlMessageType::Publish,
+      version,
+    )?;
 
     // Track Properties: consume whatever remains in the payload
     let track_properties = deserialize_track_properties(payload)?;

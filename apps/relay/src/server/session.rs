@@ -16,7 +16,7 @@ use anyhow::Result;
 use moqtail::model::parameter::setup_option::SetupOption;
 use moqtail::model::{
   control::{
-    constant::SUPPORTED_VERSIONS,
+    constant::{SUPPORTED_VERSIONS, Version},
     control_message::ControlMessage,
     namespace_done::NamespaceDone,
     setup::{Setup, SetupSender},
@@ -88,8 +88,8 @@ impl Session {
 
     let selected_version = match Self::select_protocol(&client_protocols) {
       Some(v) => {
-        info!("Selected protocol version: {}", v);
-        v.to_string()
+        info!("Selected protocol version: {}", v.alpn());
+        v
       }
       None => {
         session_request.forbidden().await;
@@ -102,7 +102,7 @@ impl Session {
     let mut response_headers: HashMap<String, String> = HashMap::new();
     response_headers.insert(
       "wt-protocol".to_string(),
-      format!("\"{}\"", selected_version),
+      format!("\"{}\"", selected_version.alpn()),
     );
 
     let connection = TransportConnection::WebTransport(
@@ -110,20 +110,28 @@ impl Session {
         .accept_with_headers(response_headers)
         .await?,
     );
-    Self::start(connection, server).await
+    Self::start(connection, server, selected_version).await
   }
 
   /// Accepts a connection that the relay's ALPN demux (see `Server::accept_incoming`)
   /// has already identified as raw QUIC (negotiated ALPN is a MOQT version string).
   /// Raw QUIC has no headers/path/origin and the version was already pinned by ALPN
   /// during the demux, so there's nothing WebTransport-specific to do here.
-  pub async fn accept_quic(connection: quinn::Connection, server: Server) -> Result<Session> {
-    Self::start(TransportConnection::Quic(connection), server).await
+  pub async fn accept_quic(
+    connection: quinn::Connection,
+    server: Server,
+    version: Version,
+  ) -> Result<Session> {
+    Self::start(TransportConnection::Quic(connection), server, version).await
   }
 
   /// Shared session bootstrap once a connection has been accepted by either transport:
   /// build the `SessionContext` and spawn the long-lived control-stream/close-watcher tasks.
-  async fn start(connection: TransportConnection, server: Server) -> Result<Session> {
+  async fn start(
+    connection: TransportConnection,
+    server: Server,
+    version: Version,
+  ) -> Result<Session> {
     let client_manager = server.client_manager.clone();
     let track_manager = server.track_manager.clone();
     let server_config = server.app_config;
@@ -143,15 +151,17 @@ impl Session {
       track_manager,
       request_maps,
       connection,
+      version,
       relay_next_request_id,
       server.active_request_streams.clone(),
       draining,
     ));
 
     info!(
-      "New session: connection_id={} transport={} remote={}",
+      "New session: connection_id={} transport={} version={} remote={}",
       context.connection_id,
       context.transport_kind,
+      context.version.alpn(),
       context.connection.remote_address()
     );
 
@@ -230,8 +240,9 @@ impl Session {
     recv_stream: TransportRecvStream,
   ) -> core::result::Result<(), TerminationCode> {
     info!("new control message stream");
-    let mut control_stream_handler =
-      ControlStreamHandler::new(send_stream, recv_stream).with_peer_id(context.connection_id);
+    let mut control_stream_handler = ControlStreamHandler::new(send_stream, recv_stream)
+      .with_peer_id(context.connection_id)
+      .with_version(context.version);
 
     // Client-server negotiation
     let client = match Self::negotiate(context.clone(), &mut control_stream_handler)
@@ -763,12 +774,13 @@ impl Session {
       .unwrap_or_default()
   }
 
-  fn select_protocol(client_protocols: &[String]) -> Option<&'static str> {
-    // wt available protocols are surrounded by quotes
-    SUPPORTED_VERSIONS.split(',').find(|v| {
+  /// The first version, in the relay's order of preference, that the client also
+  /// offers. WebTransport available protocols are quoted strings.
+  fn select_protocol(client_protocols: &[String]) -> Option<Version> {
+    Version::ALL.into_iter().find(|v| {
       client_protocols
         .iter()
-        .any(|p| p.as_str() == format!("\"{}\"", v))
+        .any(|p| p.as_str() == format!("\"{}\"", v.alpn()))
     })
   }
 
@@ -867,6 +879,7 @@ impl Session {
 
     let client = MOQTClient::new(
       context.connection_id,
+      context.version,
       Arc::new(context.connection.clone()),
       Arc::new(client_setup),
       context.server_config,
@@ -887,5 +900,44 @@ impl Session {
         Err(TerminationCode::InternalError)
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn offered(protocols: &[&str]) -> Vec<String> {
+    protocols.iter().map(|p| format!("\"{p}\"")).collect()
+  }
+
+  #[test]
+  fn webtransport_selects_draft_22_when_the_client_offers_both() {
+    for order in [["moqt-22", "moqt-20"], ["moqt-20", "moqt-22"]] {
+      assert_eq!(
+        Session::select_protocol(&offered(&order)),
+        Some(Version::Draft22),
+        "{order:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn webtransport_selects_draft_20_for_a_draft_20_client() {
+    assert_eq!(
+      Session::select_protocol(&offered(&["moqt-20"])),
+      Some(Version::Draft20)
+    );
+  }
+
+  #[test]
+  fn webtransport_refuses_a_client_with_no_supported_version() {
+    assert_eq!(
+      Session::select_protocol(&offered(&["moqt-18", "moqt-21"])),
+      None
+    );
+    assert_eq!(Session::select_protocol(&[]), None);
+    // Available protocols are quoted strings; a bare token is not a match.
+    assert_eq!(Session::select_protocol(&["moqt-22".to_string()]), None);
   }
 }

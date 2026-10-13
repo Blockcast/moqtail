@@ -562,7 +562,9 @@ async fn send_upstream_fetch_for_range(
       return None;
     }
   };
-  let mut upstream = ControlStreamHandler::new(send, recv).with_peer_id(publisher.connection_id);
+  let mut upstream = ControlStreamHandler::new(send, recv)
+    .with_peer_id(publisher.connection_id)
+    .with_version(publisher.version);
 
   {
     // Use the publisher's track alias so handle_uni_stream can resolve the track on the response.

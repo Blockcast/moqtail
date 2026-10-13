@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::constant::ControlMessageType;
+use super::constant::{ControlMessageType, Version};
 use super::control_message::ControlMessageTrait;
 use crate::model::common::varint::{BufMutVarIntExt, BufVarIntExt};
 use crate::model::error::ParseError;
 use crate::model::parameter::message_parameter::{
-  MessageParameter, deserialize_message_parameters, serialize_message_parameters,
+  MessageParameter, deserialize_message_parameters_for, serialize_message_parameters_for,
 };
 use crate::model::property::track_property::{
   TrackProperty, deserialize_track_properties, serialize_track_properties,
@@ -47,6 +47,10 @@ impl SubscribeOk {
 
 impl ControlMessageTrait for SubscribeOk {
   fn serialize(&self) -> Result<Bytes, ParseError> {
+    self.serialize_for(Version::default())
+  }
+
+  fn serialize_for(&self, version: Version) -> Result<Bytes, ParseError> {
     let mut buf = BytesMut::new();
     buf.put_vi(ControlMessageType::SubscribeOk)?;
 
@@ -54,7 +58,10 @@ impl ControlMessageTrait for SubscribeOk {
     payload.put_vi(self.track_alias)?;
 
     payload.put_vi(self.subscribe_parameters.len() as u64)?;
-    payload.extend_from_slice(&serialize_message_parameters(&self.subscribe_parameters)?);
+    payload.extend_from_slice(&serialize_message_parameters_for(
+      &self.subscribe_parameters,
+      version,
+    )?);
 
     // Track Properties (no length prefix; bounded by outer message Length field)
     payload.extend_from_slice(&serialize_track_properties(&self.track_properties)?);
@@ -76,11 +83,19 @@ impl ControlMessageTrait for SubscribeOk {
   }
 
   fn parse_payload(payload: &mut Bytes) -> Result<Box<Self>, ParseError> {
+    Self::parse_payload_for(payload, Version::default())
+  }
+
+  fn parse_payload_for(payload: &mut Bytes, version: Version) -> Result<Box<Self>, ParseError> {
     let track_alias = payload.get_vi()?;
 
     let param_count = payload.get_vi()?;
-    let subscribe_parameters =
-      deserialize_message_parameters(payload, param_count, ControlMessageType::SubscribeOk)?;
+    let subscribe_parameters = deserialize_message_parameters_for(
+      payload,
+      param_count,
+      ControlMessageType::SubscribeOk,
+      version,
+    )?;
 
     // Track Properties: consume whatever remains in the payload
     let track_properties = deserialize_track_properties(payload)?;

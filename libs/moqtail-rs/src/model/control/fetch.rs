@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::constant::{ControlMessageType, GroupOrder};
+use super::constant::{ControlMessageType, GroupOrder, Version};
 use super::control_message::ControlMessageTrait;
 use crate::model::common::tuple::{Tuple, TupleField};
 use crate::model::common::varint::{BufMutVarIntExt, BufVarIntExt};
@@ -20,7 +20,7 @@ use crate::model::data::full_track_name::FullTrackName;
 use crate::model::error::ParseError;
 use crate::model::parameter::location_filter::LocationFilter;
 use crate::model::parameter::message_parameter::{
-  MessageParameter, deserialize_message_parameters, serialize_message_parameters,
+  MessageParameter, deserialize_message_parameters_for, serialize_message_parameters_for,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -94,6 +94,10 @@ impl Fetch {
 
 impl ControlMessageTrait for Fetch {
   fn serialize(&self) -> Result<Bytes, ParseError> {
+    self.serialize_for(Version::default())
+  }
+
+  fn serialize_for(&self, version: Version) -> Result<Bytes, ParseError> {
     let mut buf = BytesMut::new();
     buf.put_vi(ControlMessageType::Fetch as u64)?;
 
@@ -104,7 +108,10 @@ impl ControlMessageTrait for Fetch {
     payload.extend_from_slice(self.track_name.as_bytes());
 
     payload.put_vi(self.parameters.len())?;
-    payload.extend_from_slice(&serialize_message_parameters(&self.parameters)?);
+    payload.extend_from_slice(&serialize_message_parameters_for(
+      &self.parameters,
+      version,
+    )?);
 
     let payload_len: u16 = payload
       .len()
@@ -123,6 +130,10 @@ impl ControlMessageTrait for Fetch {
   }
 
   fn parse_payload(payload: &mut Bytes) -> Result<Box<Self>, ParseError> {
+    Self::parse_payload_for(payload, Version::default())
+  }
+
+  fn parse_payload_for(payload: &mut Bytes, version: Version) -> Result<Box<Self>, ParseError> {
     let request_id = payload.get_vi()?;
     let track_namespace = Tuple::deserialize(payload)?;
 
@@ -138,7 +149,7 @@ impl ControlMessageTrait for Fetch {
 
     let param_count = payload.get_vi()?;
     let parameters =
-      deserialize_message_parameters(payload, param_count, ControlMessageType::Fetch)?;
+      deserialize_message_parameters_for(payload, param_count, ControlMessageType::Fetch, version)?;
 
     Ok(Box::new(Fetch {
       request_id,

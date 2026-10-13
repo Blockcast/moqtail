@@ -17,13 +17,26 @@ use crate::model::error::ParseError;
 use bytes::{Buf, Bytes};
 
 use super::{
-  constant::ControlMessageType, fetch::Fetch, fetch_ok::FetchOk, goaway::GoAway,
-  namespace::Namespace, namespace_done::NamespaceDone, publish::Publish, publish_done::PublishDone,
-  publish_namespace::PublishNamespace, publish_skipped::PublishSkipped,
-  publish_state_notify::PublishStateNotify, request_error::RequestError, request_ok::RequestOk,
-  request_update::RequestUpdate, setup::Setup, subscribe::Subscribe,
-  subscribe_namespace::SubscribeNamespace, subscribe_ok::SubscribeOk,
-  subscribe_tracks::SubscribeTracks, track_status::TrackStatus,
+  constant::{ControlMessageType, Version},
+  fetch::Fetch,
+  fetch_ok::FetchOk,
+  goaway::GoAway,
+  namespace::Namespace,
+  namespace_done::NamespaceDone,
+  publish::Publish,
+  publish_done::PublishDone,
+  publish_namespace::PublishNamespace,
+  publish_skipped::PublishSkipped,
+  publish_state_notify::PublishStateNotify,
+  request_error::RequestError,
+  request_ok::RequestOk,
+  request_update::RequestUpdate,
+  setup::Setup,
+  subscribe::Subscribe,
+  subscribe_namespace::SubscribeNamespace,
+  subscribe_ok::SubscribeOk,
+  subscribe_tracks::SubscribeTracks,
+  track_status::TrackStatus,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,10 +68,29 @@ pub trait ControlMessageTrait: std::fmt::Debug {
   where
     Self: Sized;
   fn get_type(&self) -> ControlMessageType;
+
+  /// Serializes for the wire of a negotiated `version`. Only a message that carries
+  /// parameters can differ between versions, and only that kind overrides this.
+  fn serialize_for(&self, _version: Version) -> Result<Bytes, ParseError> {
+    self.serialize()
+  }
+
+  /// Parses a payload read on the wire of a negotiated `version`.
+  fn parse_payload_for(payload: &mut Bytes, _version: Version) -> Result<Box<Self>, ParseError>
+  where
+    Self: Sized,
+  {
+    Self::parse_payload(payload)
+  }
 }
 
 impl ControlMessage {
   pub fn deserialize(bytes: &mut Bytes) -> Result<Self, ParseError> {
+    Self::deserialize_for(bytes, Version::default())
+  }
+
+  /// [`Self::deserialize`] for the wire of a negotiated `version`.
+  pub fn deserialize_for(bytes: &mut Bytes, version: Version) -> Result<Self, ParseError> {
     let message_type = bytes.get_vi()?;
     let msg_type = ControlMessageType::try_from(message_type)?;
 
@@ -82,55 +114,65 @@ impl ControlMessage {
     let mut payload = bytes.copy_to_bytes(payload_length);
     let message = match msg_type {
       ControlMessageType::Namespace => {
-        Namespace::parse_payload(&mut payload).map(ControlMessage::Namespace)
+        Namespace::parse_payload_for(&mut payload, version).map(ControlMessage::Namespace)
       }
       ControlMessageType::NamespaceDone => {
-        NamespaceDone::parse_payload(&mut payload).map(ControlMessage::NamespaceDone)
+        NamespaceDone::parse_payload_for(&mut payload, version).map(ControlMessage::NamespaceDone)
       }
       ControlMessageType::PublishNamespace => {
-        PublishNamespace::parse_payload(&mut payload).map(ControlMessage::PublishNamespace)
+        PublishNamespace::parse_payload_for(&mut payload, version)
+          .map(ControlMessage::PublishNamespace)
       }
       ControlMessageType::RequestError => {
-        RequestError::parse_payload(&mut payload).map(ControlMessage::RequestError)
+        RequestError::parse_payload_for(&mut payload, version).map(ControlMessage::RequestError)
       }
       ControlMessageType::RequestOk => {
-        RequestOk::parse_payload(&mut payload).map(ControlMessage::RequestOk)
+        RequestOk::parse_payload_for(&mut payload, version).map(ControlMessage::RequestOk)
       }
       ControlMessageType::Publish => {
-        Publish::parse_payload(&mut payload).map(ControlMessage::Publish)
+        Publish::parse_payload_for(&mut payload, version).map(ControlMessage::Publish)
       }
       ControlMessageType::PublishDone => {
-        PublishDone::parse_payload(&mut payload).map(ControlMessage::PublishDone)
+        PublishDone::parse_payload_for(&mut payload, version).map(ControlMessage::PublishDone)
       }
-      ControlMessageType::Setup => Setup::parse_payload(&mut payload).map(ControlMessage::Setup),
-      ControlMessageType::Fetch => Fetch::parse_payload(&mut payload).map(ControlMessage::Fetch),
+      ControlMessageType::Setup => {
+        Setup::parse_payload_for(&mut payload, version).map(ControlMessage::Setup)
+      }
+      ControlMessageType::Fetch => {
+        Fetch::parse_payload_for(&mut payload, version).map(ControlMessage::Fetch)
+      }
       ControlMessageType::FetchOk => {
-        FetchOk::parse_payload(&mut payload).map(ControlMessage::FetchOk)
+        FetchOk::parse_payload_for(&mut payload, version).map(ControlMessage::FetchOk)
       }
-      ControlMessageType::GoAway => GoAway::parse_payload(&mut payload).map(ControlMessage::Goaway),
+      ControlMessageType::GoAway => {
+        GoAway::parse_payload_for(&mut payload, version).map(ControlMessage::Goaway)
+      }
       ControlMessageType::Subscribe => {
-        Subscribe::parse_payload(&mut payload).map(ControlMessage::Subscribe)
+        Subscribe::parse_payload_for(&mut payload, version).map(ControlMessage::Subscribe)
       }
       ControlMessageType::SubscribeOk => {
-        SubscribeOk::parse_payload(&mut payload).map(ControlMessage::SubscribeOk)
+        SubscribeOk::parse_payload_for(&mut payload, version).map(ControlMessage::SubscribeOk)
       }
       ControlMessageType::RequestUpdate => {
-        RequestUpdate::parse_payload(&mut payload).map(ControlMessage::RequestUpdate)
+        RequestUpdate::parse_payload_for(&mut payload, version).map(ControlMessage::RequestUpdate)
       }
       ControlMessageType::TrackStatus => {
-        TrackStatus::parse_payload(&mut payload).map(ControlMessage::TrackStatus)
+        TrackStatus::parse_payload_for(&mut payload, version).map(ControlMessage::TrackStatus)
       }
       ControlMessageType::SubscribeNamespace => {
-        SubscribeNamespace::parse_payload(&mut payload).map(ControlMessage::SubscribeNamespace)
+        SubscribeNamespace::parse_payload_for(&mut payload, version)
+          .map(ControlMessage::SubscribeNamespace)
       }
       ControlMessageType::SubscribeTracks => {
-        SubscribeTracks::parse_payload(&mut payload).map(ControlMessage::SubscribeTracks)
+        SubscribeTracks::parse_payload_for(&mut payload, version)
+          .map(ControlMessage::SubscribeTracks)
       }
       ControlMessageType::PublishSkipped => {
-        PublishSkipped::parse_payload(&mut payload).map(ControlMessage::PublishSkipped)
+        PublishSkipped::parse_payload_for(&mut payload, version).map(ControlMessage::PublishSkipped)
       }
       ControlMessageType::PublishStateNotify => {
-        PublishStateNotify::parse_payload(&mut payload).map(ControlMessage::PublishStateNotify)
+        PublishStateNotify::parse_payload_for(&mut payload, version)
+          .map(ControlMessage::PublishStateNotify)
       }
     }
     .map_err(|err| ParseError::ProtocolViolation {
@@ -151,26 +193,31 @@ impl ControlMessage {
   }
 
   pub fn serialize(&self) -> Result<Bytes, ParseError> {
+    self.serialize_for(Version::default())
+  }
+
+  /// [`Self::serialize`] for the wire of a negotiated `version`.
+  pub fn serialize_for(&self, version: Version) -> Result<Bytes, ParseError> {
     match self {
-      ControlMessage::Namespace(msg) => msg.serialize(),
-      ControlMessage::NamespaceDone(msg) => msg.serialize(),
-      ControlMessage::PublishNamespace(msg) => msg.serialize(),
-      ControlMessage::RequestError(msg) => msg.serialize(),
-      ControlMessage::RequestOk(msg) => msg.serialize(),
-      ControlMessage::Publish(msg) => msg.serialize(),
-      ControlMessage::PublishDone(msg) => msg.serialize(),
-      ControlMessage::Fetch(msg) => msg.serialize(),
-      ControlMessage::FetchOk(msg) => msg.serialize(),
-      ControlMessage::Goaway(msg) => msg.serialize(),
-      ControlMessage::Setup(msg) => msg.serialize(),
-      ControlMessage::Subscribe(msg) => msg.serialize(),
-      ControlMessage::SubscribeOk(msg) => msg.serialize(),
-      ControlMessage::RequestUpdate(msg) => msg.serialize(),
-      ControlMessage::TrackStatus(msg) => msg.serialize(),
-      ControlMessage::SubscribeNamespace(msg) => msg.serialize(),
-      ControlMessage::SubscribeTracks(msg) => msg.serialize(),
-      ControlMessage::PublishSkipped(msg) => msg.serialize(),
-      ControlMessage::PublishStateNotify(msg) => msg.serialize(),
+      ControlMessage::Namespace(msg) => msg.serialize_for(version),
+      ControlMessage::NamespaceDone(msg) => msg.serialize_for(version),
+      ControlMessage::PublishNamespace(msg) => msg.serialize_for(version),
+      ControlMessage::RequestError(msg) => msg.serialize_for(version),
+      ControlMessage::RequestOk(msg) => msg.serialize_for(version),
+      ControlMessage::Publish(msg) => msg.serialize_for(version),
+      ControlMessage::PublishDone(msg) => msg.serialize_for(version),
+      ControlMessage::Fetch(msg) => msg.serialize_for(version),
+      ControlMessage::FetchOk(msg) => msg.serialize_for(version),
+      ControlMessage::Goaway(msg) => msg.serialize_for(version),
+      ControlMessage::Setup(msg) => msg.serialize_for(version),
+      ControlMessage::Subscribe(msg) => msg.serialize_for(version),
+      ControlMessage::SubscribeOk(msg) => msg.serialize_for(version),
+      ControlMessage::RequestUpdate(msg) => msg.serialize_for(version),
+      ControlMessage::TrackStatus(msg) => msg.serialize_for(version),
+      ControlMessage::SubscribeNamespace(msg) => msg.serialize_for(version),
+      ControlMessage::SubscribeTracks(msg) => msg.serialize_for(version),
+      ControlMessage::PublishSkipped(msg) => msg.serialize_for(version),
+      ControlMessage::PublishStateNotify(msg) => msg.serialize_for(version),
     }
   }
 

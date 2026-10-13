@@ -40,6 +40,7 @@ use crate::server::session_context::{PendingRequest, UpstreamFetchEvent};
 use crate::server::{config::AppConfig, session::Session};
 use anyhow::Result;
 use client_manager::ClientManager;
+use moqtail::model::control::constant::Version;
 use moqtail::model::control::control_message::ControlMessage;
 use moqtail::model::control::goaway::GoAway;
 use std::collections::BTreeMap;
@@ -222,13 +223,23 @@ impl Server {
           .map(|_| ())
       }
       Some(other) => {
+        let Some(version) = Version::from_alpn(other) else {
+          warn!(
+            remote = %remote_addr,
+            alpn = %String::from_utf8_lossy(other),
+            "QUIC connection negotiated an ALPN protocol that is no MOQT version; rejecting"
+          );
+          return Err(anyhow::anyhow!("unsupported ALPN protocol"));
+        };
         trace!(
           remote = %remote_addr,
-          alpn = %String::from_utf8_lossy(other),
+          alpn = version.alpn(),
           "demuxed incoming QUIC connection as raw QUIC"
         );
         let connection = connecting.await?;
-        Session::accept_quic(connection, server).await.map(|_| ())
+        Session::accept_quic(connection, server, version)
+          .await
+          .map(|_| ())
       }
       None => {
         warn!(

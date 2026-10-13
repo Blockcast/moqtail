@@ -29,7 +29,7 @@ use bytes::Bytes;
 use moqtail::{
   model::{
     common::tuple::Tuple,
-    control::{control_message::ControlMessage, setup::Setup},
+    control::{constant::Version, control_message::ControlMessage, setup::Setup},
     data::full_track_name::FullTrackName,
     error::StreamResetCode,
   },
@@ -109,6 +109,9 @@ pub type ResponseSenderList = Vec<Arc<RwLock<ResponseSenderMap>>>;
 #[derive(Debug, Clone)]
 pub(crate) struct MOQTClient {
   pub connection_id: usize,
+  /// The MOQT version this client's session negotiated by ALPN. Every request
+  /// stream to or from it is read and written in this version.
+  pub version: Version,
   pub transport_kind: TransportKind,
   pub connection: Arc<TransportConnection>,
   #[allow(dead_code)]
@@ -175,6 +178,7 @@ fn pick_track_alias(mode: TrackAliasMode, relay_track_id: u64, next: &AtomicU64)
 impl MOQTClient {
   pub(crate) fn new(
     connection_id: usize,
+    version: Version,
     connection: Arc<TransportConnection>,
     client_setup: Arc<Setup>,
     config: &'static AppConfig,
@@ -199,6 +203,7 @@ impl MOQTClient {
 
     MOQTClient {
       connection_id,
+      version,
       transport_kind: connection.kind(),
       connection,
       client_setup,

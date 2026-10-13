@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::constant::ControlMessageType;
+use super::constant::{ControlMessageType, Version};
 use super::control_message::ControlMessageTrait;
 use crate::model::common::location::Location;
 use crate::model::common::varint::{BufMutVarIntExt, BufVarIntExt};
 use crate::model::error::ParseError;
 use crate::model::parameter::message_parameter::{
-  MessageParameter, deserialize_message_parameters, serialize_message_parameters,
+  MessageParameter, deserialize_message_parameters_for, serialize_message_parameters_for,
 };
 use crate::model::property::track_property::{
   TrackProperty, deserialize_track_properties, serialize_track_properties,
@@ -53,6 +53,10 @@ impl FetchOk {
 
 impl ControlMessageTrait for FetchOk {
   fn serialize(&self) -> Result<Bytes, ParseError> {
+    self.serialize_for(Version::default())
+  }
+
+  fn serialize_for(&self, version: Version) -> Result<Bytes, ParseError> {
     let mut buf = BytesMut::new();
     buf.put_vi(ControlMessageType::FetchOk)?;
 
@@ -60,7 +64,10 @@ impl ControlMessageTrait for FetchOk {
     payload.put_u8(if self.end_of_track { 1u8 } else { 0u8 });
     payload.extend_from_slice(&self.end_location.serialize()?);
     payload.put_vi(self.subscribe_parameters.len())?;
-    payload.extend_from_slice(&serialize_message_parameters(&self.subscribe_parameters)?);
+    payload.extend_from_slice(&serialize_message_parameters_for(
+      &self.subscribe_parameters,
+      version,
+    )?);
 
     // Track Properties (no length prefix; bounded by outer message Length field)
     payload.extend_from_slice(&serialize_track_properties(&self.track_properties)?);
@@ -80,6 +87,10 @@ impl ControlMessageTrait for FetchOk {
   }
 
   fn parse_payload(payload: &mut Bytes) -> Result<Box<Self>, ParseError> {
+    Self::parse_payload_for(payload, Version::default())
+  }
+
+  fn parse_payload_for(payload: &mut Bytes, version: Version) -> Result<Box<Self>, ParseError> {
     if payload.remaining() < 1 {
       return Err(ParseError::NotEnoughBytes {
         context: "FetchOk::parse_payload(end_of_track)",
@@ -102,8 +113,12 @@ impl ControlMessageTrait for FetchOk {
     let end_location = Location::deserialize(payload)?;
 
     let param_count = payload.get_vi()?;
-    let subscribe_parameters =
-      deserialize_message_parameters(payload, param_count, ControlMessageType::FetchOk)?;
+    let subscribe_parameters = deserialize_message_parameters_for(
+      payload,
+      param_count,
+      ControlMessageType::FetchOk,
+      version,
+    )?;
 
     // Track Properties: consume whatever remains in the payload
     let track_properties = deserialize_track_properties(payload)?;

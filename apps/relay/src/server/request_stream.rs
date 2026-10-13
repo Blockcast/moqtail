@@ -79,8 +79,9 @@ pub(crate) async fn accept(
     Some(c) => c,
     None => return,
   };
-  let mut stream_handler =
-    ControlStreamHandler::new(send_stream, recv_stream).with_peer_id(context.connection_id);
+  let mut stream_handler = ControlStreamHandler::new(send_stream, recv_stream)
+    .with_peer_id(context.connection_id)
+    .with_version(context.version);
 
   let msg = match stream_handler.next_message().await {
     Ok(m) => m,

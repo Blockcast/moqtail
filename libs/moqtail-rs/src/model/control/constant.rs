@@ -16,7 +16,43 @@ use core::convert::From;
 
 use crate::model::error::ParseError;
 
-pub const SUPPORTED_VERSIONS: &str = "moqt-22";
+/// The ALPN protocols this crate speaks, in order of preference (§6.2). An endpoint
+/// that chooses picks the first one its peer also offers, so draft-22 is used whenever
+/// both ends support it.
+pub const SUPPORTED_VERSIONS: &str = "moqt-22,moqt-20";
+
+/// A MOQT version this crate speaks, as negotiated by ALPN (§6.2).
+///
+/// The version is fixed by the handshake, never inferred from the bytes. Draft-20
+/// and draft-22 differ on the wire only in LOCATION_FILTER (§9.20.9): draft-20
+/// length-prefixes it and infers its form from the number of fields, draft-22
+/// writes a Location Filter Type and no length. Everything else is shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Version {
+  Draft20,
+  #[default]
+  Draft22,
+}
+
+impl Version {
+  /// Every supported version, in order of preference.
+  pub const ALL: [Version; 2] = [Version::Draft22, Version::Draft20];
+
+  /// The ALPN token, e.g. `moqt-22`.
+  pub const fn alpn(self) -> &'static str {
+    match self {
+      Version::Draft20 => "moqt-20",
+      Version::Draft22 => "moqt-22",
+    }
+  }
+
+  /// The version an ALPN token names, or `None` if this crate does not speak it.
+  pub fn from_alpn(alpn: &[u8]) -> Option<Version> {
+    Version::ALL
+      .into_iter()
+      .find(|v| v.alpn().as_bytes() == alpn)
+  }
+}
 
 /// Control message types.
 ///
@@ -381,5 +417,24 @@ mod tests {
       ControlMessageType::try_from(0x07u64).unwrap(),
       ControlMessageType::RequestOk
     );
+  }
+
+  #[test]
+  fn supported_versions_lists_every_version_in_order_of_preference() {
+    let listed: Vec<&str> = SUPPORTED_VERSIONS.split(',').collect();
+    let all: Vec<&str> = Version::ALL.iter().map(|v| v.alpn()).collect();
+    assert_eq!(listed, all);
+    assert_eq!(Version::default(), Version::Draft22);
+    assert_eq!(listed[0], "moqt-22");
+  }
+
+  #[test]
+  fn alpn_round_trips_and_refuses_what_it_does_not_speak() {
+    for v in Version::ALL {
+      assert_eq!(Version::from_alpn(v.alpn().as_bytes()), Some(v));
+    }
+    for other in ["moqt-18", "moqt-21", "moqt-2", "h3", ""] {
+      assert_eq!(Version::from_alpn(other.as_bytes()), None, "{other}");
+    }
   }
 }
