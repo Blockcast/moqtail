@@ -29,7 +29,7 @@ import { ObjectForwardingPreference } from '../model/data/constant'
 import { Header } from '../model/data/header'
 import { NotEnoughBytesError, ProtocolViolationError, TimeoutError } from '../model/error/error'
 import { StreamResetCode } from '../model/error/stream_reset'
-import { asStreamResetError, streamResetCodeOf, streamResetReason } from './util/stream_reset'
+import { asStreamResetError, PeerStreamResetError, streamResetCodeOf, streamResetReason } from './util/stream_reset'
 import { logger } from '../util/logger'
 
 export class SendStream {
@@ -434,6 +434,64 @@ if (import.meta.vitest) {
         await expect(RecvStream.new(finalChunkStream(header.serialize().toUint8Array().slice(0, -1)))).rejects.toThrow(
           /incomplete header data/i,
         )
+      })
+
+      // A partial tail at FIN (the symptom a lenient subgroup parser once
+      // swallowed) could come from the reader dropping its final chunk, or
+      // from a producer that really FINs mid-object. The relay only ever writes
+      // whole objects, so drive this reader from such a producer at every
+      // split point and through a mid-object loss.
+      describe('whole-object producer: no partial tail at any split, loss is a reset', () => {
+        const objects = [5, 300, 1].map((n, i) =>
+          SubgroupObject.newWithPayload(i + 1, null, new Uint8Array(n).fill(i + 1)),
+        )
+        const wire = new Uint8Array([
+          ...header.serialize().toUint8Array(),
+          ...objects.flatMap((o, i) => [...o.serialize(i === 0 ? undefined : objects[i - 1]!.objectId).toUint8Array()]),
+        ])
+        const readAll = async (recv: RecvStream) => {
+          const reader = recv.stream.getReader()
+          const got: unknown[] = []
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) return got
+            got.push(value)
+          }
+        }
+
+        test('every split with the final chunk on done delivers every object', async () => {
+          for (let split = 1; split < wire.length; split++) {
+            const recv = await RecvStream.new(finalChunkStream(wire.slice(0, split), wire.slice(split)))
+            expect(await readAll(recv), `split=${split}`).toEqual(objects)
+          }
+        })
+
+        test('losing the tail mid-object surfaces as a reset, never a partial tail', async () => {
+          const reset = streamResetReason(StreamResetCode.DeliveryTimeout)
+          const headerLength = header.serialize().toUint8Array().length
+          for (let split = headerLength + 1; split < wire.length; split++) {
+            const results: Array<ReadableStreamReadResult<Uint8Array> | Error> = [
+              { done: false, value: wire.slice(0, split) },
+              reset,
+            ]
+            const reader = {
+              read: async () => {
+                const next = results.shift()
+                if (next instanceof Error) throw next
+                return next ?? { done: true as const, value: undefined }
+              },
+              cancel: async () => {},
+              releaseLock: () => {},
+            }
+            const recv = await RecvStream.new({ getReader: () => reader } as unknown as ReadableStream<Uint8Array>)
+            const error = await readAll(recv).then(
+              () => undefined,
+              (e: unknown) => e,
+            )
+            expect(error, `split=${split}`).toBeInstanceOf(PeerStreamResetError)
+            expect((error as PeerStreamResetError).code, `split=${split}`).toBe(StreamResetCode.DeliveryTimeout)
+          }
+        })
       })
     })
   })
