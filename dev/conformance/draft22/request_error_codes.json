@@ -23,7 +23,6 @@
     { "name": "UNINTERESTED", "value": "0x20", "spec": "Section 12.3" },
     { "name": "PREFIX_OVERLAP", "value": "0x30", "spec": "Section 12.3" },
     { "name": "NAMESPACE_TOO_LARGE", "value": "0x31", "spec": "Section 12.3" },
-    { "name": "INVALID_JOINING_REQUEST_ID", "value": "0x32", "spec": "Section 10.6" },
     { "name": "UNSUPPORTED_EXTENSION", "value": "0x33", "spec": "Section 12.3" },
     {
       "name": "REDIRECT",

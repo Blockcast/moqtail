@@ -164,6 +164,12 @@
         "value": "0x41",
         "spec": "draft-wilaw-moq-moqt-ssts, Section 5",
         "notes": "Assigns a subscription to an SSTS switching set; provisional, from an unadopted draft."
+      },
+      {
+        "name": "SWITCH_FROM",
+        "value": "0x24",
+        "spec": "moqtail/moqtail#386",
+        "notes": "Sender-side track switching. Shipped here but absent from Table 14, so it is divergence by choice rather than work outstanding."
       }
     ]
   }

@@ -45,7 +45,7 @@
     {
       "name": "OBJECT_DELIVERY_TIMEOUT",
       "value": "0x02",
-      "scope": "Track",
+      "scope": "Track, Object",
       "spec": "Section 10.2"
     },
     {
@@ -57,7 +57,7 @@
     {
       "name": "SUBGROUP_DELIVERY_TIMEOUT",
       "value": "0x06",
-      "scope": "Track",
+      "scope": "Track, Object",
       "spec": "Section 10.1"
     },
     {
