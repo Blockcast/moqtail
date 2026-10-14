@@ -19,6 +19,7 @@ import { MOQtailClient } from 'moqtail/client';
 import { CMSFCatalog, RequestError } from 'moqtail/model';
 import { logger } from '@/lib/logger';
 import { resolveMediaSourceApi, type MediaSourceApi } from '@/lib/media-source';
+import { readFirstCatalogPayload } from '@/lib/catalog-retrieval';
 
 interface MOQStreamStruct {
   trackName: string;
@@ -33,6 +34,7 @@ interface MOQStreamStruct {
 interface SubscribeOptions {
   trackName: string;
   priority?: number;
+  filterType?: FilterType;
 }
 
 export interface PlayerOptions {
@@ -44,6 +46,8 @@ export interface PlayerOptions {
   receiveCatalogViaSubscribe?: boolean;
   /** Catalog location (default: group 0, object 1) */
   catalogLocation?: [Location, Location];
+  /** Give up on the catalog after this many ms; 0 waits forever (default). */
+  catalogTimeoutMs?: number;
 }
 
 const DefaultOptions: Required<PlayerOptions> = {
@@ -51,6 +55,7 @@ const DefaultOptions: Required<PlayerOptions> = {
   namespace: Tuple.fromUtf8Path('/moqtail'),
   receiveCatalogViaSubscribe: false,
   catalogLocation: [new Location(0n, 0n), new Location(0n, 1n)],
+  catalogTimeoutMs: 0,
 };
 
 export class Player {
@@ -441,7 +446,13 @@ export class Player {
 
     let struct: MOQStreamStruct;
     if (this.#options.receiveCatalogViaSubscribe) {
-      struct = await this.subscribe({ trackName: 'catalog', priority: 0 });
+      // The catalog is posted once and retained, not re-published live, so
+      // NextGroupStart would wait for a group that never comes.
+      struct = await this.subscribe({
+        trackName: 'catalog',
+        priority: 0,
+        filterType: FilterType.LatestObject,
+      });
     } else {
       const [startLoc, endLoc] = this.#options.catalogLocation;
       logger.info(
@@ -471,35 +482,15 @@ export class Player {
     }
 
     // Pull the latest catalog object
-    const reader = struct.source.getReader();
-    let buffer: ArrayBufferLike | undefined;
-    let objectsRead = 0;
-    while (!buffer) {
-      const result = await reader.read();
-      if (result.done) {
-        logger.error(
-          'player',
-          `retrieveCatalog: stream closed after ${objectsRead} object(s) — no catalog data`,
-        );
-        await reader.releaseLock();
-        throw new Error('Catalog stream closed unexpectedly while waiting for data');
-      }
-      const value = result.value;
-      objectsRead++;
-      if (value.isEndOfGroup()) {
-        logger.debug('player', `retrieveCatalog: skipping end-of-group object (#${objectsRead})`);
-        continue;
-      }
-      if (!value.payload?.buffer) {
-        logger.warn('media', 'Received catalog object without payload, ignoring');
-        continue;
-      }
-      logger.info(
-        'player',
-        `retrieveCatalog: got catalog payload — ${value.payload.byteLength}B (after ${objectsRead} read(s))`,
-      );
-      buffer = value.payload.buffer;
+    let buffer: ArrayBufferLike;
+    try {
+      buffer = await readFirstCatalogPayload(struct.source, this.#options.catalogTimeoutMs);
+    } catch (error) {
+      logger.error('player', `retrieveCatalog: ${(error as Error).message}`);
+      if (this.#options.receiveCatalogViaSubscribe) await this.unsubscribe(struct.requestId);
+      throw error;
     }
+    logger.info('player', `retrieveCatalog: got catalog payload — ${buffer.byteLength}B`);
 
     // Parse and store the catalog
     const catalog = CMSFCatalog.from(buffer);
@@ -525,7 +516,7 @@ export class Player {
     const result = await this.client.subscribe({
       fullTrackName: ftn,
       groupOrder: GroupOrder.Original,
-      filterType: FilterType.NextGroupStart,
+      filterType: params.filterType ?? FilterType.NextGroupStart,
       forward: true,
       priority: params.priority ?? 0,
       // MSE needs each group's fragments in order, so release subgroups in
