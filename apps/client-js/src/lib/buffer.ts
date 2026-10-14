@@ -15,6 +15,7 @@
  */
 
 import { logger } from '@/lib/logger';
+import { nextRangeSeekTarget } from '@/lib/next-range';
 
 // MSE Buffer Configuration
 export const MSE_IMMEDIATE_SEEK_THRESHOLD = 0.1; // seconds
@@ -224,32 +225,31 @@ class MSEBuffer {
     // Only consider seeking if we're very close to the end (within threshold)
     if (distanceToEnd > this.config.stallThreshold) return { seek: false };
 
-    // Check if there's a next buffered range
-    if (currentRangeIndex + 1 < buffered.length) {
-      for (let nextRange = currentRangeIndex + 1; nextRange < buffered.length; nextRange++) {
-        const nextRangeStart = buffered.start(currentRangeIndex + 1);
-        const gap = nextRangeStart - currentRangeEnd;
-
-        // If gap is too small, seek to next range immediately
-        if (gap < MSE_IMMEDIATE_SEEK_THRESHOLD) {
-          logger.info(
-            'buffer',
-            `[mseBuffer] Small gap of ${gap.toFixed(3)}s to next range, seeking immediately`,
-          );
-          return { seek: true, targetTime: nextRangeStart };
-        }
-
-        if (gap > 0) {
-          logger.warn(
-            'buffer',
-            `[mseBuffer] At buffer end with gap of ${gap.toFixed(3)}s, must jump to next range`,
-          );
-          return { seek: true, targetTime: nextRangeStart };
-        }
+    const minDuration = Math.max(this.config.stallThreshold, this.config.liveEdgeDelay);
+    const nextRangeStart = nextRangeSeekTarget(buffered, currentRangeIndex, minDuration);
+    if (nextRangeStart === null) {
+      if (currentRangeIndex + 1 < buffered.length) {
+        logger.warn(
+          'buffer',
+          `[mseBuffer] Next range shorter than ${minDuration}s, waiting for it to grow`,
+        );
       }
+      return { seek: false };
     }
 
-    return { seek: false };
+    const gap = nextRangeStart - currentRangeEnd;
+    if (gap < MSE_IMMEDIATE_SEEK_THRESHOLD) {
+      logger.info(
+        'buffer',
+        `[mseBuffer] Small gap of ${gap.toFixed(3)}s to next range, seeking immediately`,
+      );
+    } else {
+      logger.warn(
+        'buffer',
+        `[mseBuffer] At buffer end with gap of ${gap.toFixed(3)}s, must jump to next range`,
+      );
+    }
+    return { seek: true, targetTime: nextRangeStart };
   }
 
   private findNearestBufferedRange(
