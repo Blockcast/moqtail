@@ -150,8 +150,8 @@ impl IncomingRequestIds {
       return false;
     }
     if state.pending.len() >= MAX_PENDING_REQUEST_IDS {
-      // A missing request stream can leave a permanent hole. Advance past the
-      // oldest observed ID rather than closing an otherwise healthy session.
+      // A missing request stream can leave a permanent hole. Consume the
+      // oldest observed gap rather than closing an otherwise healthy session.
       let oldest_pending = *state.pending.iter().min().unwrap();
       if request_id < oldest_pending {
         state.next_contiguous = request_id.saturating_add(2);
@@ -824,6 +824,15 @@ mod tests {
       assert!(ids.validate(request_id));
     }
     assert!(ids.validate((MAX_PENDING_REQUEST_IDS as u64 + 3) * 2));
+    assert!(!ids.validate(0));
+    assert!(!ids.validate(2));
+
+    let ids = IncomingRequestIds::default();
+    for request_id in (2..=(MAX_PENDING_REQUEST_IDS as u64) * 2).step_by(2) {
+      assert!(ids.validate(request_id));
+    }
+    assert!(ids.validate(0));
+    assert!(!ids.validate(2));
   }
 
   use crate::server::stream_id::{StreamId, StreamType};
