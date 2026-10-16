@@ -2164,20 +2164,16 @@ export class MOQtailClient {
         if (done) throw new MOQtailError('WebTransport session is terminated')
         const handler = getHandlerForControlMessage(msg)
         if (!handler) {
-          // Strictly a PROTOCOL_VIOLATION, but the relay still pushes a few messages
-          // here (PUBLISH_DONE, REQUEST_UPDATE fan-out) that draft-18 puts on request
-          // streams. Warn rather than tear the session down until that is cleaned up.
-          logger.warn(
+          throw new ProtocolViolationError(
             'MOQtailClient',
             `${msg.constructor.name} on the control stream; draft-18 allows only SETUP and GOAWAY there`,
           )
-          continue
         }
         await handler(this, msg)
       }
     } catch (error) {
-      this.disconnect()
-      throw error
+      logger.error('MOQtailClient', 'control stream failed', error)
+      await this.disconnect(error)
     }
   }
 
@@ -2228,20 +2224,33 @@ export class MOQtailClient {
    * the first message started.
    */
   async #dispatchIncomingRequestStream(requestStream: RequestStream): Promise<void> {
-    const first = await requestStream.next()
+    let first: ControlMessage | undefined
+    try {
+      first = await requestStream.next()
+    } catch (error) {
+      logger.error('MOQtailClient', 'incoming request stream failed before its first message', error)
+      await this.disconnect(error)
+      await requestStream.close()
+      return
+    }
     if (!first) return
 
     if (!ControlMessageType.isFirst(first.getType())) {
+      const error = new ProtocolViolationError(
+        'MOQtailClient',
+        `${first.constructor.name} may not open a request stream; the first message must be First-marked`,
+      )
       logger.warn('MOQtailClient', `${first.constructor.name} may not open a request stream; resetting it`)
       await requestStream.reset(StreamResetCode.InternalError)
+      await this.disconnect(error)
       return
     }
 
-    // The first message names the request; everything later on this stream belongs to it.
-    const openingRequestId = (first as { requestId: bigint }).requestId
-    requestStream.openingType = first.getType()
-
     try {
+      // The first message names the request; everything later on this stream belongs to it.
+      const openingRequestId = (first as { requestId: bigint }).requestId
+      requestStream.openingType = first.getType()
+
       let msg: ControlMessage | undefined = first
       while (msg) {
         const handler = getHandlerForRequestStreamMessage(msg)
@@ -2256,6 +2265,7 @@ export class MOQtailClient {
       }
     } catch (error) {
       logger.error('MOQtailClient', 'incoming request stream failed', error)
+      await this.disconnect(error)
     } finally {
       // The peer closed or reset the stream: cancel whatever it was serving. Every
       // First-marked type carries a request id, but the union as a whole does not.
@@ -3125,6 +3135,17 @@ if (import.meta.vitest) {
       control.enqueue(new GoAway(undefined, 0n, 6n).serialize().toUint8Array())
       await vi.waitFor(() => expect(terminated).toHaveLength(1))
       expect(seen).toHaveLength(1)
+    })
+
+    it('closes the session when a request message arrives on the control stream', async () => {
+      const { client, transport, control } = await connected()
+      const terminated: unknown[] = []
+      client.onSessionTerminated = (reason) => terminated.push(reason)
+
+      control.enqueue(new RequestOk().serialize().toUint8Array())
+
+      await vi.waitFor(() => expect(terminated).toHaveLength(1))
+      expect(transport.closeCount).toBe(1)
     })
 
     it('closes the WebTransport session on disconnect, once', async () => {
