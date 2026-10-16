@@ -2461,6 +2461,7 @@ if (import.meta.vitest) {
     readonly readable: ReadableStream<Uint8Array>
     readonly writable: WritableStream<Uint8Array>
     isClosed = false
+    #peerWriteError: unknown
     /** The reason the client aborted the send side with, if it did. */
     abortReason: unknown
     /** The reason the client cancelled the receive side with, if it did. */
@@ -2478,6 +2479,10 @@ if (import.meta.vitest) {
       })
       this.writable = new WritableStream<Uint8Array>({
         write: (chunk) => {
+          if (this.#peerWriteError !== undefined) {
+            this.isClosed = true
+            throw this.#peerWriteError
+          }
           this.sentChunks.push(chunk)
         },
         close: () => {
@@ -2498,6 +2503,11 @@ if (import.meta.vitest) {
     /** Resets this stream from the peer side. */
     resetFromPeer(code: StreamResetCode): void {
       this.#peer.error(streamResetReason(code))
+    }
+
+    /** Makes the peer reset this stream's send side. */
+    resetWritesFromPeer(code: StreamResetCode): void {
+      this.#peerWriteError = streamResetReason(code)
     }
 
     /** Everything the client has written to this stream so far. */
@@ -3256,6 +3266,23 @@ if (import.meta.vitest) {
       reset.respond(new SubscribeNamespace(4n, Tuple.fromUtf8Path('room'), []))
       await vi.waitFor(() => expect(reset.messages).toHaveLength(1))
       reset.resetFromPeer(StreamResetCode.Cancelled)
+
+      const incoming = transport.openIncomingBiStream()
+      incoming.respond(new SubscribeNamespace(5n, Tuple.fromUtf8Path('room'), []))
+      await vi.waitFor(() => expect(incoming.messages).toHaveLength(1))
+      expect(incoming.messages[0]).toBeInstanceOf(RequestOk)
+      expect(transport.closeCount).toBe(0)
+
+      await client.disconnect()
+    })
+
+    it('keeps the session alive when a peer resets the send side during a response', async () => {
+      const { client, transport } = await connected()
+
+      const reset = transport.openIncomingBiStream()
+      reset.resetWritesFromPeer(StreamResetCode.Cancelled)
+      reset.respond(new SubscribeNamespace(4n, Tuple.fromUtf8Path('room'), []))
+      await vi.waitFor(() => expect(reset.isClosed).toBe(true))
 
       const incoming = transport.openIncomingBiStream()
       incoming.respond(new SubscribeNamespace(5n, Tuple.fromUtf8Path('room'), []))
