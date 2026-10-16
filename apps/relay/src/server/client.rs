@@ -106,11 +106,31 @@ pub type SendStreamList = Vec<SendStreamLock>;
 pub type ResponseSenderMap = HashMap<u64, mpsc::UnboundedSender<ControlMessage>>;
 pub type ResponseSenderList = Vec<Arc<RwLock<ResponseSenderMap>>>;
 
+/// Maximum number of request IDs allowed to arrive ahead of the contiguous
+/// low-water mark. This bounds state while allowing normal stream reordering.
+const MAX_PENDING_REQUEST_IDS: usize = 1024;
+
 /// Request IDs received from one peer. IDs stay registered for the whole
-/// session because draft-18 forbids reuse after a request has ended.
+/// session because draft-18 forbids reuse after a request has ended. The
+/// contiguous prefix is compacted; only a bounded out-of-order window remains.
 #[derive(Debug, Default)]
 pub(crate) struct IncomingRequestIds {
-  seen: StdMutex<HashSet<u64>>,
+  state: StdMutex<IncomingRequestIdState>,
+}
+
+#[derive(Debug)]
+struct IncomingRequestIdState {
+  next_contiguous: u64,
+  pending: HashSet<u64>,
+}
+
+impl Default for IncomingRequestIdState {
+  fn default() -> Self {
+    Self {
+      next_contiguous: 0,
+      pending: HashSet::new(),
+    }
+  }
 }
 
 impl IncomingRequestIds {
@@ -119,11 +139,28 @@ impl IncomingRequestIds {
       return false;
     }
 
-    self
-      .seen
+    let mut state = self
+      .state
       .lock()
-      .expect("incoming request ID registry lock poisoned")
-      .insert(request_id)
+      .expect("incoming request ID registry lock poisoned");
+    if request_id < state.next_contiguous {
+      return false;
+    }
+    if request_id == state.next_contiguous {
+      state.next_contiguous = state.next_contiguous.saturating_add(2);
+      loop {
+        let next = state.next_contiguous;
+        if !state.pending.remove(&next) {
+          break;
+        }
+        state.next_contiguous = state.next_contiguous.saturating_add(2);
+      }
+      return true;
+    }
+    if state.pending.len() >= MAX_PENDING_REQUEST_IDS {
+      return false;
+    }
+    state.pending.insert(request_id)
   }
 }
 
@@ -736,6 +773,25 @@ mod tests {
         .filter(|accepted| *accepted)
         .count(),
       1
+    );
+  }
+
+  #[test]
+  fn incoming_request_ids_compact_and_bound_out_of_order_state() {
+    let ids = IncomingRequestIds::default();
+    for request_id in (0..=2048).step_by(2) {
+      assert!(ids.validate(request_id));
+    }
+    assert!(ids.state.lock().unwrap().pending.is_empty());
+
+    let ids = IncomingRequestIds::default();
+    for index in 1..=MAX_PENDING_REQUEST_IDS {
+      assert!(ids.validate((index as u64) * 2));
+    }
+    assert!(!ids.validate((MAX_PENDING_REQUEST_IDS as u64 + 1) * 2));
+    assert_eq!(
+      ids.state.lock().unwrap().pending.len(),
+      MAX_PENDING_REQUEST_IDS
     );
   }
 
