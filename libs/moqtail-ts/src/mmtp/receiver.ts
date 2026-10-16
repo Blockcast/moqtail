@@ -37,6 +37,11 @@ export interface MmtpReceiverStats {
   mfus: number
   /** Payloads rejected as malformed or protocol-violating. */
   rejected: number
+  /**
+   * Incomplete MFUs discarded to stay within `maxBuffered`. Each one is lost
+   * media that neither `rejected` nor `onReject` reports.
+   */
+  evicted: number
 }
 
 /**
@@ -49,7 +54,9 @@ export interface MmtpReceiverStats {
 export class MmtpTrackReceiver {
   readonly #reassembler: MFUReassembler
   readonly #onReject: ((error: unknown, object: MoqtObject) => void) | undefined
-  readonly #stats: MmtpReceiverStats = { packets: 0, statusObjects: 0, mfus: 0, rejected: 0 }
+  readonly #stats: Omit<MmtpReceiverStats, 'evicted'> = { packets: 0, statusObjects: 0, mfus: 0, rejected: 0 }
+  // libmmt zeroes its counters on reset(); evictions before a reset live here.
+  #evictedBeforeReset = 0
 
   constructor(options: MmtpReceiverOptions = {}) {
     this.#reassembler = new MFUReassembler({
@@ -60,7 +67,7 @@ export class MmtpTrackReceiver {
   }
 
   get stats(): Readonly<MmtpReceiverStats> {
-    return { ...this.#stats }
+    return { ...this.#stats, evicted: this.#evictedBeforeReset + this.#reassembler.stats.evictedMemoryLimit }
   }
 
   /** Feed one object; returns the MFU it completed, if any. */
@@ -98,6 +105,7 @@ export class MmtpTrackReceiver {
 
   /** Drop all reassembly state, e.g. before re-subscribing. */
   reset(): void {
+    this.#evictedBeforeReset += this.#reassembler.stats.evictedMemoryLimit
     this.#reassembler.reset()
   }
 }

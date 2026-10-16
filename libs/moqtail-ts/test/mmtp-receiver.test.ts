@@ -72,6 +72,7 @@ describe('MmtpTrackReceiver vectors', () => {
         statusObjects: 0,
         mfus: c.mfus.length,
         rejected: c.rejected,
+        evicted: 0,
       })
     })
   }
@@ -92,7 +93,7 @@ describe('MmtpTrackReceiver', () => {
       ObjectStatus.EndOfGroup,
     )
     expect(receiver.push(end)).toBeNull()
-    expect(receiver.stats).toEqual({ packets: 0, statusObjects: 1, mfus: 0, rejected: 0 })
+    expect(receiver.stats).toEqual({ packets: 0, statusObjects: 1, mfus: 0, rejected: 0, evicted: 0 })
   })
 
   test('a rejected object does not stop the track', () => {
@@ -137,5 +138,17 @@ describe('MmtpTrackReceiver', () => {
     receiver.push(object(0, fromHex(first!)))
     receiver.reset()
     expect(rest.map((hex, i) => receiver.push(object(i + 1, fromHex(hex))))).toEqual([null, null])
+  })
+
+  test('an MFU evicted by maxBuffered is counted, and survives reset()', () => {
+    const receiver = new MmtpTrackReceiver({ maxBuffered: 1 })
+    const [run2] = cases.find((c) => c.name === 'fragmented-in-order')!.objects
+    // The same head fragment re-addressed to MPU 3: a second open data unit.
+    const run3 = run2!.replace(/^(.{16})000000c8(.{8})00000002/, '$1000000d0$200000003')
+    expect(receiver.push(object(0, fromHex(run2!)))).toBeNull()
+    expect(receiver.push(object(1, fromHex(run3)))).toBeNull()
+    expect(receiver.stats.evicted).toBe(1)
+    receiver.reset()
+    expect(receiver.stats.evicted).toBe(1)
   })
 })

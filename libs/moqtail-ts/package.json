@@ -100,7 +100,7 @@
     "vitest": "^5.0.3"
   },
   "peerDependencies": {
-    "@blockcast/mmt-container": "0.3.0"
+    "@blockcast/mmt-container": "~0.3.0"
   },
   "peerDependenciesMeta": {
     "@blockcast/mmt-container": {
