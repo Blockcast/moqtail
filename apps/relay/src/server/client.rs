@@ -146,6 +146,33 @@ impl IncomingRequestIds {
     if request_id < state.next_contiguous {
       return false;
     }
+    if state.pending.contains(&request_id) {
+      return false;
+    }
+    if state.pending.len() >= MAX_PENDING_REQUEST_IDS {
+      // A missing request stream can leave a permanent hole. Advance past the
+      // oldest observed ID rather than closing an otherwise healthy session.
+      let oldest_pending = *state.pending.iter().min().unwrap();
+      if request_id < oldest_pending {
+        state.next_contiguous = request_id.saturating_add(2);
+        loop {
+          let next = state.next_contiguous;
+          if !state.pending.remove(&next) {
+            break;
+          }
+          state.next_contiguous = state.next_contiguous.saturating_add(2);
+        }
+        return true;
+      }
+      state.next_contiguous = oldest_pending;
+      loop {
+        let next = state.next_contiguous;
+        if !state.pending.remove(&next) {
+          break;
+        }
+        state.next_contiguous = state.next_contiguous.saturating_add(2);
+      }
+    }
     if request_id == state.next_contiguous {
       state.next_contiguous = state.next_contiguous.saturating_add(2);
       loop {
@@ -788,11 +815,15 @@ mod tests {
     for index in 1..=MAX_PENDING_REQUEST_IDS {
       assert!(ids.validate((index as u64) * 2));
     }
-    assert!(!ids.validate((MAX_PENDING_REQUEST_IDS as u64 + 1) * 2));
-    assert_eq!(
-      ids.state.lock().unwrap().pending.len(),
-      MAX_PENDING_REQUEST_IDS
-    );
+    assert!(ids.validate((MAX_PENDING_REQUEST_IDS as u64 + 1) * 2));
+    assert!(ids.state.lock().unwrap().pending.len() <= MAX_PENDING_REQUEST_IDS);
+
+    let ids = IncomingRequestIds::default();
+    assert!(ids.validate(2));
+    for request_id in (4..=(MAX_PENDING_REQUEST_IDS as u64 + 2) * 2).step_by(2) {
+      assert!(ids.validate(request_id));
+    }
+    assert!(ids.validate((MAX_PENDING_REQUEST_IDS as u64 + 3) * 2));
   }
 
   use crate::server::stream_id::{StreamId, StreamType};
