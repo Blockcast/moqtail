@@ -105,6 +105,28 @@ pub(crate) async fn accept(
     return;
   }
 
+  let Some(request_id) = msg.request_id() else {
+    Session::close_session(
+      context,
+      TerminationCode::ProtocolViolation,
+      "Request stream opening message has no request ID",
+    );
+    return;
+  };
+  if !client.validate_incoming_request_id(request_id) {
+    warn!(
+      "Invalid or duplicate peer request ID {} on {:?}",
+      request_id,
+      msg.get_type()
+    );
+    Session::close_session(
+      context,
+      TerminationCode::InvalidRequestID,
+      "Invalid or duplicate request ID",
+    );
+    return;
+  }
+
   // While draining, reject new requests with GOING_AWAY.
   if context.draining.load(Ordering::Relaxed) {
     warn!(

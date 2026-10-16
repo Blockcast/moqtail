@@ -41,9 +41,9 @@ use moqtail::{
 use switch_context::SwitchContext;
 
 use std::{
-  collections::{BTreeMap, HashMap, VecDeque},
+  collections::{BTreeMap, HashMap, HashSet, VecDeque},
   sync::{
-    Arc,
+    Arc, Mutex as StdMutex,
     atomic::{AtomicU64, Ordering},
   },
   time::Duration,
@@ -106,6 +106,27 @@ pub type SendStreamList = Vec<SendStreamLock>;
 pub type ResponseSenderMap = HashMap<u64, mpsc::UnboundedSender<ControlMessage>>;
 pub type ResponseSenderList = Vec<Arc<RwLock<ResponseSenderMap>>>;
 
+/// Request IDs received from one peer. IDs stay registered for the whole
+/// session because draft-18 forbids reuse after a request has ended.
+#[derive(Debug, Default)]
+pub(crate) struct IncomingRequestIds {
+  seen: StdMutex<HashSet<u64>>,
+}
+
+impl IncomingRequestIds {
+  pub(crate) fn validate(&self, request_id: u64) -> bool {
+    if request_id & 1 != 0 {
+      return false;
+    }
+
+    self
+      .seen
+      .lock()
+      .expect("incoming request ID registry lock poisoned")
+      .insert(request_id)
+  }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct MOQTClient {
   pub connection_id: usize,
@@ -127,6 +148,10 @@ pub(crate) struct MOQTClient {
   // responses/follow-ups produced elsewhere (e.g. a deferred SUBSCRIBE_OK fan-out)
   // are delivered onto that stream instead of the control stream.
   pub response_senders: Arc<ResponseSenderList>,
+
+  // Request IDs received from this peer. This is separate from the active
+  // request maps so completed or cancelled IDs cannot be reused.
+  pub incoming_request_ids: Arc<IncomingRequestIds>,
 
   // fetch requests that this client sent to the relay
   pub incoming_fetch_requests: Arc<RwLock<BTreeMap<u64, FetchRequest>>>,
@@ -214,6 +239,7 @@ impl MOQTClient {
           .map(|_| Arc::new(RwLock::new(HashMap::new())))
           .collect(),
       ),
+      incoming_request_ids: Arc::new(IncomingRequestIds::default()),
       incoming_fetch_requests: Arc::new(RwLock::new(BTreeMap::new())),
       outgoing_fetch_requests: Arc::new(RwLock::new(BTreeMap::new())),
       subscribe_requests: Arc::new(RwLock::new(BTreeMap::new())),
@@ -323,6 +349,11 @@ impl MOQTClient {
       Some(tx) => tx.send(message).is_ok(),
       None => false,
     }
+  }
+
+  /// Validate and reserve a request ID received from this peer.
+  pub(crate) fn validate_incoming_request_id(&self, request_id: u64) -> bool {
+    self.incoming_request_ids.validate(request_id)
   }
 
   /// Calculate the partition index for stream distribution across buckets.
@@ -676,6 +707,38 @@ mod tests {
     let second = pick_track_alias(TrackAliasMode::PerSubscription, 7, &next);
     assert_ne!(first, second);
   }
+
+  #[test]
+  fn incoming_request_ids_require_even_unique_ids_for_the_session() {
+    let ids = IncomingRequestIds::default();
+
+    assert!(ids.validate(0));
+    assert!(ids.validate(2));
+    assert!(!ids.validate(1));
+    assert!(!ids.validate(0));
+    assert!(!ids.validate(2));
+  }
+
+  #[test]
+  fn incoming_request_id_reservation_is_atomic() {
+    let ids = Arc::new(IncomingRequestIds::default());
+    let threads = (0..8)
+      .map(|_| {
+        let ids = ids.clone();
+        std::thread::spawn(move || ids.validate(42))
+      })
+      .collect::<Vec<_>>();
+
+    assert_eq!(
+      threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .filter(|accepted| *accepted)
+        .count(),
+      1
+    );
+  }
+
   use crate::server::stream_id::{StreamId, StreamType};
 
   /// Test helper struct that exposes the partition logic for testing
