@@ -3082,6 +3082,31 @@ if (import.meta.vitest) {
       await client.disconnect()
     })
 
+    it('closes the session on a second GOAWAY on one request stream', async () => {
+      const { client, transport } = await connected()
+      const terminated: unknown[] = []
+      client.onSessionTerminated = (reason) => terminated.push(reason)
+
+      const subscribing = client.subscribe({
+        fullTrackName: ftn,
+        filterType: FilterType.LatestObject,
+        forward: true,
+        groupOrder: GroupOrder.Original,
+        priority: 0,
+      })
+      const subscribingSettled = subscribing.then(
+        () => undefined,
+        (error) => error,
+      )
+      const subscribeStream = await openedStream(transport, 0)
+      subscribeStream.respond(new GoAway(undefined, 250n))
+      subscribeStream.respond(new GoAway(undefined, 250n))
+
+      await vi.waitFor(() => expect(terminated).toHaveLength(1))
+      expect(transport.closeCount).toBe(1)
+      expect(await subscribingSettled).toBeInstanceOf(Error)
+    })
+
     it('closes the session on a second GOAWAY on the control stream', async () => {
       const { client, control } = await connected()
       const seen: GoAway[] = []

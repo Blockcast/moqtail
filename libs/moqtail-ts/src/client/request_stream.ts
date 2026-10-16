@@ -44,6 +44,8 @@ export class RequestStream {
   openingType?: ControlMessageType
   /** Set when the request this stream carried has been re-issued on a new stream. */
   migrated = false
+  /** A request stream may carry at most one GOAWAY (§10.4). */
+  goawayReceived = false
   readonly #reader: ReadableStreamDefaultReader<Uint8Array>
   readonly #writer: WritableStreamDefaultWriter<Uint8Array>
   #receiveBuffer: ByteBuffer
@@ -143,7 +145,7 @@ export class RequestStream {
           if (this.#receiveBuffer.length >= totalMessageSize) {
             const messageBytes = this.#receiveBuffer.getBytes(totalMessageSize)
             this.#receiveBuffer.commit()
-            const msg = ControlMessage.deserialize(new FrozenByteBuffer(messageBytes))
+            const msg = ControlMessage.deserialize(new FrozenByteBuffer(messageBytes), 'request')
             controller.enqueue(msg)
             continue
           }
