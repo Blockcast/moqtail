@@ -2228,8 +2228,12 @@ export class MOQtailClient {
     try {
       first = await requestStream.next()
     } catch (error) {
-      logger.error('MOQtailClient', 'incoming request stream failed before its first message', error)
-      await this.disconnect(error)
+      if (error instanceof PeerStreamResetError) {
+        logger.debug('MOQtailClient', `incoming request stream reset before its first message: ${error.message}`)
+      } else {
+        logger.error('MOQtailClient', 'incoming request stream failed before its first message', error)
+        await this.disconnect(error)
+      }
       await requestStream.close()
       return
     }
@@ -2264,8 +2268,12 @@ export class MOQtailClient {
         msg = await requestStream.next()
       }
     } catch (error) {
-      logger.error('MOQtailClient', 'incoming request stream failed', error)
-      await this.disconnect(error)
+      if (error instanceof PeerStreamResetError) {
+        logger.debug('MOQtailClient', `incoming request stream reset by peer: ${error.message}`)
+      } else {
+        logger.error('MOQtailClient', 'incoming request stream failed', error)
+        await this.disconnect(error)
+      }
     } finally {
       // The peer closed or reset the stream: cancel whatever it was serving. Every
       // First-marked type carries a request id, but the union as a whole does not.
@@ -2485,6 +2493,11 @@ if (import.meta.vitest) {
     /** Delivers `msg` to the client on this stream, as the peer would. */
     respond(msg: ControlMessage): void {
       this.#peer.enqueue(ControlMessage.serialize(msg).toUint8Array())
+    }
+
+    /** Resets this stream from the peer side. */
+    resetFromPeer(code: StreamResetCode): void {
+      this.#peer.error(streamResetReason(code))
     }
 
     /** Everything the client has written to this stream so far. */
@@ -3217,6 +3230,38 @@ if (import.meta.vitest) {
       expect(incoming.messages).toHaveLength(0)
       expect(streamResetCodeOf(incoming.abortReason)).toBe(StreamResetCode.InternalError)
       expect(streamResetCodeOf(incoming.cancelReason)).toBe(StreamResetCode.InternalError)
+
+      await client.disconnect()
+    })
+
+    it('keeps the session alive when a peer request stream resets before its first message', async () => {
+      const { client, transport } = await connected()
+
+      const reset = transport.openIncomingBiStream()
+      reset.resetFromPeer(StreamResetCode.Cancelled)
+
+      const incoming = transport.openIncomingBiStream()
+      incoming.respond(new SubscribeNamespace(4n, Tuple.fromUtf8Path('room'), []))
+      await vi.waitFor(() => expect(incoming.messages).toHaveLength(1))
+      expect(incoming.messages[0]).toBeInstanceOf(RequestOk)
+      expect(transport.closeCount).toBe(0)
+
+      await client.disconnect()
+    })
+
+    it('keeps the session alive when a peer resets an active request stream', async () => {
+      const { client, transport } = await connected()
+
+      const reset = transport.openIncomingBiStream()
+      reset.respond(new SubscribeNamespace(4n, Tuple.fromUtf8Path('room'), []))
+      await vi.waitFor(() => expect(reset.messages).toHaveLength(1))
+      reset.resetFromPeer(StreamResetCode.Cancelled)
+
+      const incoming = transport.openIncomingBiStream()
+      incoming.respond(new SubscribeNamespace(5n, Tuple.fromUtf8Path('room'), []))
+      await vi.waitFor(() => expect(incoming.messages).toHaveLength(1))
+      expect(incoming.messages[0]).toBeInstanceOf(RequestOk)
+      expect(transport.closeCount).toBe(0)
 
       await client.disconnect()
     })
