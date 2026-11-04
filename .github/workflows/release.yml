@@ -16,7 +16,9 @@ jobs:
   release:
     name: Changelog PR or Release
     if: ${{ github.repository_owner == 'moqtail' }}
-    runs-on: ubuntu-latest
+    runs-on:
+      group: default-tools
+      labels: arc-light
     permissions:
       contents: write
       pull-requests: write

@@ -16,7 +16,10 @@ concurrency:
 jobs:
   check-pr-commits:
     name: Check PR Commits
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on:
+      group: default-tools
+      labels: arc-light
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -38,8 +41,12 @@ jobs:
 
   editorconfig:
     name: EditorConfig Check
-    if: github.event.action == 'opened' || github.event.action == 'synchronize'
-    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && (github.event.action == 'opened' || github.event.action == 'synchronize')
+    runs-on:
+      group: default-tools
+      labels: arc-light
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -55,8 +62,13 @@ jobs:
 
   dco:
     name: DCO Sign-off Check
-    if: ${{ !startsWith(github.head_ref, 'changeset') && !startsWith(github.head_ref, 'dependabot') }}
-    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && !startsWith(github.head_ref, 'changeset')
+      && !startsWith(github.head_ref, 'dependabot')
+    runs-on:
+      group: default-tools
+      labels: arc-light
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -83,8 +95,12 @@ jobs:
 
   license:
     name: License Check
-    if: github.event.action == 'opened' || github.event.action == 'synchronize'
-    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && (github.event.action == 'opened' || github.event.action == 'synchronize')
+    runs-on:
+      group: default-tools
+      labels: arc-light
     permissions:
       contents: read
       pull-requests: read

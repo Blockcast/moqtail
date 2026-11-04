@@ -16,7 +16,10 @@ concurrency:
 jobs:
   changed-files:
     name: Check Changed Files
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on:
+      group: default-tools
+      labels: arc-light
     outputs:
       any_changed: ${{ steps.changed.outputs.any_changed }}
     steps:
@@ -30,9 +33,13 @@ jobs:
           files: libs/moqtail-ts/**
 
   build-and-test:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: default-tools
+      labels: arc-light
     needs: changed-files
-    if: needs.changed-files.outputs.any_changed == 'true'
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && needs.changed-files.outputs.any_changed == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -55,10 +62,18 @@ jobs:
 
   aggregate:
     name: Build and Test JavaScript
-    runs-on: ubuntu-latest
+    runs-on:
+      group: default-tools
+      labels: arc-light
     needs: build-and-test
-    if: ${{ !cancelled() }}
+    if: ${{ always() && !cancelled() }}
     steps:
+      - name: Reject fork pull requests
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "Fork pull requests are not executed on shared ARC runners."
+          exit 1
+
       - name: All checks have passed
         if: ${{ !contains(needs.*.result, 'failure') }}
         run: |
