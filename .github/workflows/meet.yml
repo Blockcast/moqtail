@@ -21,7 +21,9 @@ concurrency:
 jobs:
   meet:
     if: ${{ github.repository_owner == 'moqtail' }}
-    runs-on: ubuntu-latest
+    runs-on:
+      group: default-tools
+      labels: arc-deploy
     environment:
       name: cloudflare
       url: 'https://meet.moqtail.dev'

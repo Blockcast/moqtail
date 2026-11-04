@@ -20,7 +20,9 @@ jobs:
   release:
     name: Release Rust
     if: ${{ github.repository_owner == 'moqtail' }}
-    runs-on: ubuntu-latest
+    runs-on:
+      group: default-tools
+      labels: arc-light
     environment:
       name: crates
       url: https://crates.io/crates/moqtail
