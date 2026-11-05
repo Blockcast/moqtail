@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   check-pr-commits:
+    timeout-minutes: 15
     name: Check PR Commits
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on:
@@ -40,6 +41,7 @@ jobs:
         run: npx commitlint --from ${{ github.event.pull_request.base.sha }} --to ${{ github.event.pull_request.head.sha }} --verbose
 
   editorconfig:
+    timeout-minutes: 15
     name: EditorConfig Check
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -61,6 +63,7 @@ jobs:
         run: editorconfig-checker -format gcc
 
   dco:
+    timeout-minutes: 15
     name: DCO Sign-off Check
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -94,6 +97,7 @@ jobs:
           echo "All commits have DCO sign-off."
 
   license:
+    timeout-minutes: 15
     name: License Check
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
