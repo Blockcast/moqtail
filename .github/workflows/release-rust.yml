@@ -18,6 +18,7 @@ env:
 
 jobs:
   release:
+    timeout-minutes: 60
     name: Release Rust
     if: ${{ github.repository_owner == 'moqtail' }}
     runs-on:

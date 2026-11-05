@@ -25,6 +25,7 @@ env:
 
 jobs:
   publish:
+    timeout-minutes: 60
     name: Build and Publish Relay Image
     if: ${{ github.repository == 'moqtail/moqtail' }}
     runs-on:
