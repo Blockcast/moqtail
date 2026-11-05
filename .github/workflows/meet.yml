@@ -22,7 +22,7 @@ jobs:
   meet:
     if: ${{ github.repository_owner == 'moqtail' }}
     runs-on:
-      group: default-tools
+      group: default
       labels: arc-deploy
     environment:
       name: cloudflare
